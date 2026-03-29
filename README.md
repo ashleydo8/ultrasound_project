@@ -39,3 +39,14 @@ graph TD
     
     B -- "Records Frames" --> G
 ```
+
+## Additional Notes 
+
+1. Clarius firmware is 12.2.1.
+   
+3. Cast Binary Release used is 12.2.0 (for Mac Intel core)
+   
+5. dependencies include: pyclariuscast.so, libcast.dylib
+
+
+
