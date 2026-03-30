@@ -3,6 +3,10 @@ import os
 import gc
 import queue
 import sys
+
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+os.environ["QT_API"] = "pyqt5"
+
 import threading
 import time 
 from datetime import datetime
@@ -38,6 +42,7 @@ from ui.constants import SCALE, _needle_pivot_calibrator, CALIBRATIONS_DIR, SLIC
 
 # IMPORTANT: On Windows, importing Qt *before* hardware DLLs can cause crashes or device enumeration failures.
 # Always import all hardware dependencies (e.g., ultrasound, NatNet) FIRST!
+
 from qtpy.QtCore import QTimer, Qt
 from qtpy.QtWidgets import (
     QApplication,
@@ -52,8 +57,8 @@ from qtpy.QtWidgets import (
     QMessageBox,
 )
 
-USE_FAKE_ULTRASOUND = False  
-USE_FAKE_POSE = True        
+USE_FAKE_ULTRASOUND = True   
+USE_FAKE_POSE = False        
 
 recording_buffer = RecordingBuffer()
 
@@ -498,6 +503,23 @@ class RealTimeUSViewer(QWidget):
         self.volume_layer = model3d.add_image(self.volume, name='Ultrasound Volume')  # <--- save handle!
         model3d.dims.axis_labels = ('Z','Y','X')
         self.model3d = model3d
+
+        #natnet implementation - 3/30/2026 
+
+        self.streaming_points = self.model3d.add_points(
+            np.zeros((0, 3)), 
+            name='Live Rigid Bodies', 
+            size=10.0, # Large enough to see in mm-scale volume
+            face_color='magenta'
+        )
+
+        self.streaming_vectors = self.model3d.add_vectors(
+            np.zeros((0, 2, 3)), 
+            name='Live Orientations', 
+            edge_width=3.0, 
+            edge_color='cyan'
+        )
+
         self._apply_camera_defaults()
         qtviewer3d = QtViewer(model3d, show_welcome_screen=False)
         qtviewer3d.setParent(self)
@@ -1023,6 +1045,41 @@ class RealTimeUSViewer(QWidget):
             import traceback; traceback.print_exc()
         finally:
             self._timer.start(int(1000 / GUI_FPS))
+
+        #add tracking update - 3/30/2026
+
+        if hasattr(self, 'tracker') and self.tracker is not None:
+            poses = self.tracker.get_rigid_body_poses()
+            if poses:
+                pts = []
+                vecs = []
+                for rb_id, (pos, quat) in poses.items():
+                    if pos is not None and quat is not None:
+                        # Convert Meters (OptiTrack) to Millimeters (Viewer Scale)
+                        pos_mm = pos * 1000.0
+                        pts.append(pos_mm)
+                        
+                        # 50mm orientation vector
+                        direction_mm = R.from_quat(quat).apply([0, 0, 50.0])
+                        vecs.append([pos_mm, direction_mm])
+                
+                if pts:
+                    try:
+                        # 1. Check if the layer object still exists in the model
+                        if hasattr(self, 'streaming_points_layer') and self.streaming_points_layer in self.model3d.layers:
+                            
+                            # 2. CRITICAL: Check if Napari has mapped the layer to a Vispy visual
+                            if self.viewer3d.window._qt_viewer.layer_to_visual.get(self.streaming_points_layer):
+                                self.streaming_points_layer.data = np.array(pts)
+                        
+                        if hasattr(self, 'streaming_vectors_layer') and self.streaming_vectors_layer in self.model3d.layers:
+                            if self.viewer3d.window._qt_viewer.layer_to_visual.get(self.streaming_vectors_layer):
+                                self.streaming_vectors_layer.data = np.array(vecs)
+                                
+                    except (KeyError, RuntimeError, AttributeError):
+                        pass
+
+    
     @staticmethod
     def _slice_axes_indices(key: str) -> Tuple[int, int]:
         if key == "axial":
@@ -2169,6 +2226,7 @@ class RealTimeUSViewer(QWidget):
 
 
 def main() -> None:
+
     # Always create QApplication FIRST!
     app = QApplication(sys.argv)
     print("QApplication created:", app)
@@ -2179,6 +2237,8 @@ def main() -> None:
         logger.warning(
             "qdarkstyle is not installed; falling back to the default Qt theme."
         )
+
+
     # Safe to create queues and widgets now
     frame_q = queue.Queue(maxsize=QUEUE_MAXSIZE)
     stop_event = threading.Event()
@@ -2190,23 +2250,60 @@ def main() -> None:
         # Start the ultrasound stream (fake or real, based on config)
         drimg.start_ultrasound_stream(ip=args.ip, port=args.port,fake_data=USE_FAKE_ULTRASOUND)
 
-        tracker_factory = partial(
-            NatNetClientWrapper,
+        tracker = NatNetClientWrapper(
             server_address=TRACKER_SERVER_ADDRESS,
             client_address=TRACKER_CLIENT_ADDRESS,
             use_multicast=TRACKER_USE_MULTICAST,
             print_level=TRACKER_PRINT_LEVEL,
             use_fake=USE_FAKE_POSE,
         )
+
+        tracker.start()        
+
         print("creating viewer")
         viewer = RealTimeUSViewer(frame_q, stop_event, consumer_thread=None, volume=blank_volume)
         print("created viewer")
         viewer.show()
         print("showed viewer")
+
+        ### TBD section ######################################################
+
+        def update_tracking_stream():
+            poses = tracker.get_rigid_body_poses()
+            if poses:
+                pts, vecs = [], []
+                for _, (pos, quat) in poses.items():
+                    if pos is not None and quat is not None:
+                        # Convert Meters to Millimeters
+                        pos_mm = pos * 1000.0
+                        pts.append(pos_mm)
+                        direction_mm = R.from_quat(quat).apply([0, 0, 50.0])
+                        vecs.append([pos_mm, direction_mm])
+                
+                if pts:
+                    try:
+                        # SAFETY CHECK: Only update if the GPU visual is ready
+                        qt_v = viewer.viewer3d.window._qt_viewer
+                        if qt_v.layer_to_visual.get(viewer.streaming_points_layer):
+                            viewer.streaming_points_layer.data = np.array(pts)
+                        if qt_v.layer_to_visual.get(viewer.streaming_vectors_layer):
+                            viewer.streaming_vectors_layer.data = np.array(vecs)
+                    except (AttributeError, KeyError):
+                        pass # Visual not ready yet, skip this frame
+
+        tracking_timer = QTimer()
+        tracking_timer.timeout.connect(update_tracking_stream) 
+        
+        # Start the timer WITH A DELAY or after show()
+        # 33ms = ~30 FPS
+        tracking_timer.start(33)
+
+        ##########################################################
+
         # Now start the consumer thread (AFTER GUI setup)
         consumer = threading.Thread(
             target=consumer_main,
-            args=(frame_q, stop_event, tracker_factory),
+            args=(frame_q, stop_event, lambda: tracker),
             daemon=False,
         )
         consumer.start()
@@ -2232,6 +2329,7 @@ def main() -> None:
         # Stop hardware streams
         try:
             drimg.stop_ultrasound_stream()
+            tracker.stop()
         except Exception:
             logger.warning("Error shutting down ultrasound stream", exc_info=True)
     sys.exit(rc)
