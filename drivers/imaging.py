@@ -17,42 +17,13 @@ class UltrasoundImage:
     FAKE_MICRONS_PER_PIXEL = 100.0
     TOP_BLACK_ROWS = 24
 
-# _IMPORT_ERROR = None
-# pyclariuscast = None
-# _LIBCAST_HANDLE = None
+# windows - importing pyclariuscast 
 
-#for mac 
+dir_path = r"C:\Users\mingd\Desktop\ultrasound_project"
+if dir_path not in sys.path:
+    sys.path.append(dir_path)
 
-libcast_path = "/Users/ashleydo/ultrasound_project/dependencies/libcast.dylib"
-ctypes.CDLL(libcast_path, ctypes.RTLD_GLOBAL)
-deps_path = "/Users/ashleydo/ultrasound_project/dependencies"
-if deps_path not in sys.path:
-    sys.path.insert(0, deps_path)
-import pyclariuscast 
- 
-# try:
-#     import pyclariuscast
-# except ImportError as e:
-#     print(f"Error: Module 'pyclariuscast' not found in {libcast_path}")
-#     print(f"Check your .so filename. Detailed error: {e}")
-#     sys.exit(1)
-
-# try:
-#     if sys.platform.startswith("linux"):
-#         _LIBCAST_HANDLE = ctypes.CDLL("./libcast.so", ctypes.RTLD_GLOBAL)._handle
-#         ctypes.cdll.LoadLibrary("./pyclariuscast.so")
-#     import pyclariuscast as _pyclariuscast 
-# except (ImportError, OSError) as primary_exc:
-#     try:
-#         from dependencies import pyclariuscast as _pyclariuscast  
-#     except (ImportError, OSError) as fallback_exc:
-#         pyclariuscast = None
-#     else:
-#         pyclariuscast = _pyclariuscast
-#         _IMPORT_ERROR = None
-# else:
-#     pyclariuscast = _pyclariuscast
-#     _IMPORT_ERROR = None
+from dependencies import pyclariuscast
 
 #store latest us frame, timestamp, spatial calibration 
 
@@ -205,9 +176,9 @@ def newImuData(imu):
 
 def freezeFn(frozen):
     if frozen:
-        print("\nimaging frozen")
+        print("\nImaging frozen. Restart viewer to display live ultrasound.")
     else:
-        print("imaging running")
+        print("Imaging running.")
 
 
 def buttonsFn(button, clicks):
@@ -262,8 +233,8 @@ def start_ultrasound_stream(ip="192.168.1.1", port=5828, fake_data=False):
         return
 
     # path = os.path.abspath(os.path.expanduser("~/")) 
-    path = "/Users/ashleydo/ultrasound_project/dependencies"  
-    print(f"DEBUG: Initializing Caster with path: {path}") 
+    path = r"C:\Users\mingd\Desktop\ultrasound_project\dependencies"  
+    # print(f"DEBUG: Initializing Caster with path: {path}") 
     cast = pyclariuscast.Caster(newProcessedImage, newRawImage, newSpectrumImage, newImuData, freezeFn, buttonsFn)
     ret = cast.init(path, args.width, args.height)
 
@@ -313,6 +284,3 @@ def get_new_us_frame() -> Tuple[Optional[float], Optional[np.ndarray], Optional[
 def get_latest_imu():
     with STATE.lock:
         return list(STATE.imu_buffer)
-
-
-start_ultrasound_stream( ip=args.ip, port=args.port, fake_data=False)
