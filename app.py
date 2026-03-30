@@ -52,8 +52,8 @@ from qtpy.QtWidgets import (
     QMessageBox,
 )
 
-USE_FAKE_ULTRASOUND = False  # or False, depending on your test
-USE_FAKE_POSE = True        # or False, depending on your test
+USE_FAKE_ULTRASOUND = False  
+USE_FAKE_POSE = True        
 
 recording_buffer = RecordingBuffer()
 
