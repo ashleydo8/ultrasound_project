@@ -1,4 +1,4 @@
-# Ultrasound_Project Structure 
+# Project Structure 
 
 ## core/
 *Responsible for the mathematical heavy-lifting and spatial logic.*
