@@ -58,7 +58,7 @@ from qtpy.QtWidgets import (
 )
 
 USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = False        
+USE_FAKE_POSE = True        
 
 recording_buffer = RecordingBuffer()
 
@@ -290,11 +290,6 @@ def consumer_main(
         logger.info("consumer_main: finally stop_event.set() (was %s)", stop_event.is_set())
         stop_event.set()
 
-
-
-
-
-
 class RealTimeUSViewer(QWidget):
     def __init__(
         self,
@@ -444,7 +439,7 @@ class RealTimeUSViewer(QWidget):
         self.needle_slice_chk.setChecked(True)
         self.needle_slice_chk.stateChanged.connect(self.toggle_needle_slice_overlay)
         controls_layout.addWidget(self.needle_slice_chk)
-        self.rb_status_label = QLabel("Streaming rigid bodies: (none)")
+        self.rb_status_label = QLabel(f"Streaming rigid bodies:____")
         self.rb_status_label.setWordWrap(True)
         controls_layout.addWidget(self.rb_status_label)
         self.marker_chk = QCheckBox("Show Markers")
@@ -495,37 +490,44 @@ class RealTimeUSViewer(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    #create an stl probe to overlay the ultrasound arrow (napari mesh layer)
+
+    import meshio 
+
+    def load_probe_mesh(self, path):
+        mesh = self.meshio.read(path)
+        #for a napari surface: (vertices, faces, values)
+        return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
+    
+    def load_needle_mesh(self,path):
+        mesh = self.meshio.read(path)
+        return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
+
     def _init_viewers_and_layers(self) -> None:
         # 3D viewer
         model3d = ViewerModel(ndisplay=3)
         if hasattr(model3d.axes, "in_canvas"):
             model3d.axes.in_canvas = True
-        self.volume_layer = model3d.add_image(self.volume, name='Ultrasound Volume')  # <--- save handle!
+        self.volume_layer = model3d.add_image(self.volume, name='Ultrasound Volume')  
         model3d.dims.axis_labels = ('Z','Y','X')
         self.model3d = model3d
 
-        #natnet implementation - 3/30/2026 
 
-        self.streaming_points = self.model3d.add_points(
-            np.zeros((0, 3)), 
-            name='Live Rigid Bodies', 
-            size=10.0, # Large enough to see in mm-scale volume
-            face_color='magenta'
-        )
-
-        self.streaming_vectors = self.model3d.add_vectors(
-            np.zeros((0, 2, 3)), 
-            name='Live Orientations', 
-            edge_width=3.0, 
-            edge_color='cyan'
-        )
+        # self.grid.setRowStretch(0, 2)  # Main viewer row (2/3 of height)
+        # self.grid.setRowStretch(1, 1)  # 2D planes row (1/3 of height)
+        # self.grid.setColumnStretch(0, 1)
+        # self.grid.setColumnStretch(1, 1)
+        # self.grid.setColumnStretch(2, 1)
 
         self._apply_camera_defaults()
         qtviewer3d = QtViewer(model3d, show_welcome_screen=False)
         qtviewer3d.setParent(self)
         qtviewer3d.show()
         self.viewer3d = qtviewer3d
+        # self.grid.addWidget(qtviewer3d, 0, 0, 1, 3)
         self.grid.addWidget(qtviewer3d, 0, 0)
+
         # Live ultrasound image viewer (2D stream in its own pane)
         self.ultrasound_model = ViewerModel(ndisplay=2)
         if hasattr(self.ultrasound_model.axes, "in_canvas"):
@@ -540,6 +542,8 @@ class RealTimeUSViewer(QWidget):
         ultrasound_layout.addWidget(ultrasound_label)
         ultrasound_layout.addWidget(ultrasound_qt)
         ultrasound_qt.show()
+        self.grid.addWidget(self.ultrasound_container, 0, 3, 2, 1)
+        self.grid.setColumnStretch(3, 0)
         self.grid.addWidget(self.ultrasound_container, 0, 2)
         self._ultrasound_frame = np.zeros(UltrasoundImage.US_2D_SHAPE, dtype=np.float32)
         self.ultrasound_image_layer = self.ultrasound_model.add_image(
@@ -555,6 +559,7 @@ class RealTimeUSViewer(QWidget):
             self.ultrasound_container.setVisible(pane_visible)
         if self.ultrasound_image_layer is not None:
             self.ultrasound_image_layer.visible = pane_visible
+
         # Live US slice layer (3D transformed image)
         self.live_slice = np.zeros((1, self.volume.shape[1], self.volume.shape[2]), dtype=np.float32)
         self.live_slice_spacing = self._voxel_size_mm.copy() * float(ULTRASOUND_PLANE_VIS_SCALE)
@@ -572,6 +577,7 @@ class RealTimeUSViewer(QWidget):
         # 2D slice viewers
         self.slice_viewers = {}
         self.slice_layers = {}
+        plane_keys = ['axial', 'coronal', 'sagittal']
         self._max_markers = 5
         self.arrow_data = np.zeros((1, 2, 3), dtype=np.float32)
         self.marker_data = np.zeros((self._max_markers, 3), dtype=np.float32)
@@ -654,28 +660,52 @@ class RealTimeUSViewer(QWidget):
                 blending='translucent',
             )
             self.ground_axes_layers.append(layer)
+
         self.vec_layer = self.model3d.add_vectors(
             self.arrow_data,
             name='Ultrasound Arrow',
             edge_width=vec_width,
             vector_style='arrow',
+            edge_color='yellow',
             visible=self.us_arrow_chk.isChecked() if hasattr(self, "us_arrow_chk") else True,
         )
+
+        self.probe_mesh_data = self.load_probe_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\probe.stl")
+        self.needle_mesh_data = self.load_needle_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\needle.stl")
+
+        self.probe_layer = self.model3d.add_surface(
+            self.probe_mesh_data,
+            name='Probe STL',
+            blending='translucent',
+            colormap="yellow",
+            shading='smooth',
+            opacity=1
+        )
+
+        self.needle_layer = self.model3d.add_surface(
+            self.needle_mesh_data,
+            name='Needle STL',
+            colormap="cyan",
+            blending='translucent',
+            shading='smooth',
+            opacity=1
+        )
+
         self.needle_vec_layer = self.model3d.add_vectors(
             self.needle_arrow_data,
-            name='Needle Line',
+            name='Needle',
             edge_width=vec_width,
             vector_style='line',
-            edge_color='yellow',
+            edge_color='cyan',
             visible=self.needle_arrow_chk.isChecked() and self._needle_has_pose if hasattr(self, "needle_arrow_chk") else False,
         )
         self.marker_layer = self.model3d.add_points(self.marker_data[:0], ndim=3, size=5.0, name='Markers')
         self.needle_tip_layer = self.model3d.add_points(
             np.zeros((0, 3), dtype=np.float32),
             ndim=3,
-            size=6.0,
+            size=5.0,
             name='Needle Tip Markers',
-            face_color='red',
+            face_color='magenta',
         )
         if hasattr(self.needle_tip_layer, "edge_color"):
             self.needle_tip_layer.edge_color = 'white'
@@ -698,6 +728,7 @@ class RealTimeUSViewer(QWidget):
         # Angles are (elevation, azimuth, roll) in degrees.
         self.model3d.camera.angles = (180.0, 0.0, -225.0)
         self.model3d.camera.zoom = 1.25
+        
     @staticmethod
     def _build_prism_mesh_for_segment(start: np.ndarray, end: np.ndarray, thickness_mm: float) -> Tuple[np.ndarray, np.ndarray]:
         """Extrude a line segment into a thin rectangular prism mesh."""
@@ -897,6 +928,17 @@ class RealTimeUSViewer(QWidget):
             if self._us_calibration_recording:
                 self._capture_ultrasound_calibration_sample(packet.frame_ts, frame2d, pose_matrix)
             corrected_matrix = pose_matrix @ self.us_correction_matrix
+            probe_matrix = corrected_matrix
+            probe_translation = probe_matrix.copy()
+            orientation_correction = R.from_euler('y', 90, degrees=True).as_matrix()
+            probe_orientation = np.eye(4) 
+            probe_orientation[:3,:3] = orientation_correction
+            probe_translation[:3,3] = probe_translation[:3,3] * 1000
+            # print(f"DEBUG: probe translation is: {probe_translation[:3,3]}")
+            self.probe_layer.affine = probe_translation @ probe_orientation
+            if self.probe_layer is not None:
+                self.probe_layer.visible = self.us_arrow_chk.isChecked()
+
             corrected_pos, corrected_quat = self._matrix_to_pose(corrected_matrix)
             pose = Pose.from_pos_rot(
                 corrected_pos.astype(np.float32),
@@ -954,6 +996,14 @@ class RealTimeUSViewer(QWidget):
                 start_mm = top_pose.pos_mm.astype(np.float32)
                 tip_mm = tip_pose.pos_mm.astype(np.float32)
                 vec_mm = tip_mm - start_mm
+                
+                affine_matrix = np.eye(4)
+                needle_matrix = np.eye(4)
+                orientation_correction = R.from_euler('x', 90, degrees=True).as_matrix()
+                needle_matrix[:3,:3] = orientation_correction
+                affine_matrix[:3, :3] = corrected_top_matrix[:3, :3] @ orientation_correction # Rotation 
+                affine_matrix[:3, 3] = corrected_top_matrix[:3, 3]  * 1000 # Translation (Position)
+
                 if np.linalg.norm(vec_mm) < 1e-6:
                     vec_mm = (top_pose.body_rot * top_pose.align_rot).apply(LOCAL_ARROW_DIR)
                     vec_mm = (vec_mm * NEEDLE_ARROW_LENGTH_MM).astype(np.float32)
@@ -961,6 +1011,7 @@ class RealTimeUSViewer(QWidget):
                 self.needle_arrow_data[0, 1, :] = vec_mm.astype(np.float32)
                 if self.needle_vec_layer is not None:
                     self.needle_vec_layer.data = self.needle_arrow_data
+                    self.needle_layer.affine = affine_matrix
                     self.needle_vec_layer.visible = self.needle_arrow_chk.isChecked()
                 self._needle_has_pose = True
                 self._current_needle_pose = tip_pose
@@ -1046,40 +1097,6 @@ class RealTimeUSViewer(QWidget):
         finally:
             self._timer.start(int(1000 / GUI_FPS))
 
-        #add tracking update - 3/30/2026
-
-        if hasattr(self, 'tracker') and self.tracker is not None:
-            poses = self.tracker.get_rigid_body_poses()
-            if poses:
-                pts = []
-                vecs = []
-                for rb_id, (pos, quat) in poses.items():
-                    if pos is not None and quat is not None:
-                        # Convert Meters (OptiTrack) to Millimeters (Viewer Scale)
-                        pos_mm = pos * 1000.0
-                        pts.append(pos_mm)
-                        
-                        # 50mm orientation vector
-                        direction_mm = R.from_quat(quat).apply([0, 0, 50.0])
-                        vecs.append([pos_mm, direction_mm])
-                
-                if pts:
-                    try:
-                        # 1. Check if the layer object still exists in the model
-                        if hasattr(self, 'streaming_points_layer') and self.streaming_points_layer in self.model3d.layers:
-                            
-                            # 2. CRITICAL: Check if Napari has mapped the layer to a Vispy visual
-                            if self.viewer3d.window._qt_viewer.layer_to_visual.get(self.streaming_points_layer):
-                                self.streaming_points_layer.data = np.array(pts)
-                        
-                        if hasattr(self, 'streaming_vectors_layer') and self.streaming_vectors_layer in self.model3d.layers:
-                            if self.viewer3d.window._qt_viewer.layer_to_visual.get(self.streaming_vectors_layer):
-                                self.streaming_vectors_layer.data = np.array(vecs)
-                                
-                    except (KeyError, RuntimeError, AttributeError):
-                        pass
-
-    
     @staticmethod
     def _slice_axes_indices(key: str) -> Tuple[int, int]:
         if key == "axial":
@@ -1526,11 +1543,11 @@ class RealTimeUSViewer(QWidget):
 
     def simple_calibrate_ultrasound_origin(self) -> None:
         """Anchor at (0,0,0) with normal +X (faces forward), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_FWD, label="face +X")
+        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_FWD, label="face +Y")
 
     def simple_calibrate_ultrasound_flipped(self) -> None:
         """Anchor at (0,0,0) with normal -X (flipped), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_REV, label="face -X")
+        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_REV, label="face -Y")
 
     def _detect_plane_points(self, frame: np.ndarray, max_points: int = 200) -> np.ndarray:
         """
@@ -2216,15 +2233,6 @@ class RealTimeUSViewer(QWidget):
         self._perform_shutdown()
         super().close()
 
-
-
-
-
-
-
-
-
-
 def main() -> None:
 
     # Always create QApplication FIRST!
@@ -2265,40 +2273,6 @@ def main() -> None:
         print("created viewer")
         viewer.show()
         print("showed viewer")
-
-        ### TBD section ######################################################
-
-        def update_tracking_stream():
-            poses = tracker.get_rigid_body_poses()
-            if poses:
-                pts, vecs = [], []
-                for _, (pos, quat) in poses.items():
-                    if pos is not None and quat is not None:
-                        # Convert Meters to Millimeters
-                        pos_mm = pos * 1000.0
-                        pts.append(pos_mm)
-                        direction_mm = R.from_quat(quat).apply([0, 0, 50.0])
-                        vecs.append([pos_mm, direction_mm])
-                
-                if pts:
-                    try:
-                        # SAFETY CHECK: Only update if the GPU visual is ready
-                        qt_v = viewer.viewer3d.window._qt_viewer
-                        if qt_v.layer_to_visual.get(viewer.streaming_points_layer):
-                            viewer.streaming_points_layer.data = np.array(pts)
-                        if qt_v.layer_to_visual.get(viewer.streaming_vectors_layer):
-                            viewer.streaming_vectors_layer.data = np.array(vecs)
-                    except (AttributeError, KeyError):
-                        pass # Visual not ready yet, skip this frame
-
-        tracking_timer = QTimer()
-        tracking_timer.timeout.connect(update_tracking_stream) 
-        
-        # Start the timer WITH A DELAY or after show()
-        # 33ms = ~30 FPS
-        tracking_timer.start(33)
-
-        ##########################################################
 
         # Now start the consumer thread (AFTER GUI setup)
         consumer = threading.Thread(
