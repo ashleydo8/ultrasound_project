@@ -451,7 +451,7 @@ class RealTimeUSViewer(QWidget):
         self.ultrasound_chk.stateChanged.connect(self.toggle_ultrasound)
         controls_layout.addWidget(self.ultrasound_chk)
         self.ultrasound_pane_chk = QCheckBox("Show Ultrasound Pane")
-        self.ultrasound_pane_chk.setChecked(True)
+        self.ultrasound_pane_chk.setChecked(False)
         self.ultrasound_pane_chk.stateChanged.connect(self.toggle_ultrasound_pane)
         controls_layout.addWidget(self.ultrasound_pane_chk)
         self.recon_volume_chk = QCheckBox("Show Reconstructed Volume")
@@ -513,21 +513,12 @@ class RealTimeUSViewer(QWidget):
         model3d.dims.axis_labels = ('Z','Y','X')
         self.model3d = model3d
 
-
-        # self.grid.setRowStretch(0, 2)  # Main viewer row (2/3 of height)
-        # self.grid.setRowStretch(1, 1)  # 2D planes row (1/3 of height)
-        # self.grid.setColumnStretch(0, 1)
-        # self.grid.setColumnStretch(1, 1)
-        # self.grid.setColumnStretch(2, 1)
-
         self._apply_camera_defaults()
         qtviewer3d = QtViewer(model3d, show_welcome_screen=False)
         qtviewer3d.setParent(self)
         qtviewer3d.show()
         self.viewer3d = qtviewer3d
-        # self.grid.addWidget(qtviewer3d, 0, 0, 1, 3)
-        self.grid.addWidget(qtviewer3d, 0, 0)
-
+        self.grid.addWidget(qtviewer3d, 0, 0, 1, 3) #starts at (0,0), takes 1 row, spans 3 columns 
         # Live ultrasound image viewer (2D stream in its own pane)
         self.ultrasound_model = ViewerModel(ndisplay=2)
         if hasattr(self.ultrasound_model.axes, "in_canvas"):
@@ -542,9 +533,9 @@ class RealTimeUSViewer(QWidget):
         ultrasound_layout.addWidget(ultrasound_label)
         ultrasound_layout.addWidget(ultrasound_qt)
         ultrasound_qt.show()
-        self.grid.addWidget(self.ultrasound_container, 0, 3, 2, 1)
-        self.grid.setColumnStretch(3, 0)
-        self.grid.addWidget(self.ultrasound_container, 0, 2)
+        # self.grid.addWidget(self.ultrasound_container, 0, 2, 1, 1)
+        # self.grid.setRowStretch(0, 2)
+        # self.grid.setRowStretch(1, 1)
         self._ultrasound_frame = np.zeros(UltrasoundImage.US_2D_SHAPE, dtype=np.float32)
         self.ultrasound_image_layer = self.ultrasound_model.add_image(
             self._ultrasound_frame,
@@ -552,14 +543,13 @@ class RealTimeUSViewer(QWidget):
             colormap='gray',
         )
         self.ultrasound_viewer = ultrasound_qt
-        pane_visible = True
+        pane_visible = True 
         if hasattr(self, "ultrasound_pane_chk"):
             pane_visible = self.ultrasound_pane_chk.isChecked()
         if self.ultrasound_container is not None:
             self.ultrasound_container.setVisible(pane_visible)
         if self.ultrasound_image_layer is not None:
             self.ultrasound_image_layer.visible = pane_visible
-
         # Live US slice layer (3D transformed image)
         self.live_slice = np.zeros((1, self.volume.shape[1], self.volume.shape[2]), dtype=np.float32)
         self.live_slice_spacing = self._voxel_size_mm.copy() * float(ULTRASOUND_PLANE_VIS_SCALE)
@@ -682,14 +672,14 @@ class RealTimeUSViewer(QWidget):
             opacity=1
         )
 
-        self.needle_layer = self.model3d.add_surface(
-            self.needle_mesh_data,
-            name='Needle STL',
-            colormap="cyan",
-            blending='translucent',
-            shading='smooth',
-            opacity=1
-        )
+        # self.needle_layer = self.model3d.add_surface(
+        #     self.needle_mesh_data,
+        #     name='Needle STL',
+        #     colormap="cyan",
+        #     blending='translucent',
+        #     shading='smooth',
+        #     opacity=1
+        # )
 
         self.needle_vec_layer = self.model3d.add_vectors(
             self.needle_arrow_data,
@@ -1011,7 +1001,7 @@ class RealTimeUSViewer(QWidget):
                 self.needle_arrow_data[0, 1, :] = vec_mm.astype(np.float32)
                 if self.needle_vec_layer is not None:
                     self.needle_vec_layer.data = self.needle_arrow_data
-                    self.needle_layer.affine = affine_matrix
+                    # self.needle_layer.affine = affine_matrix
                     self.needle_vec_layer.visible = self.needle_arrow_chk.isChecked()
                 self._needle_has_pose = True
                 self._current_needle_pose = tip_pose
@@ -1177,10 +1167,30 @@ class RealTimeUSViewer(QWidget):
                 img_layer.visible = visible
     def toggle_ultrasound_pane(self, state: int) -> None:
         visible = bool(state)
+
         if self.ultrasound_image_layer is not None:
             self.ultrasound_image_layer.visible = visible
+
         if self.ultrasound_container is not None:
+
             self.ultrasound_container.setVisible(visible)
+        
+        if visible:
+            self.grid.removeWidget(self.viewer3d)
+            self.grid.removeWidget(self.ultrasound_container)
+
+            self.grid.addWidget(self.viewer3d, 0, 0, 1, 2)
+            self.grid.addWidget(self.ultrasound_container, 0, 2, 1, 1)
+
+            self.grid.setColumnStretch(0, 1)
+            self.grid.setColumnStretch(1, 1)
+            self.grid.setColumnStretch(2, 1)
+        else: 
+            self.grid.addWidget(self.viewer3d, 0, 0, 1, 3)
+            self.grid.setColumnStretch(0, 1)
+            self.grid.setColumnStretch(1, 1)
+            self.grid.setColumnStretch(2, 1)
+
     def toggle_recon_volume(self, state: int) -> None:
         visible = bool(state)
         if self.recon_volume_layer is not None and self._has_recon_volume:
