@@ -47,6 +47,7 @@ from qtpy.QtCore import QTimer, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -58,7 +59,7 @@ from qtpy.QtWidgets import (
 )
 
 USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = False        
+USE_FAKE_POSE = True        
 
 recording_buffer = RecordingBuffer()
 
@@ -383,8 +384,8 @@ class RealTimeUSViewer(QWidget):
         self._closed = False
         
     def _init_ui(self) -> None:
-        self.setWindowTitle(f"Kaneko Lab - US Viewer ({GUI_FPS} Hz)")
-        self.resize(1200, 800)
+        self.setWindowTitle(f"Kaneko Lab - US Reconstruction ({GUI_FPS} Hz)")
+        self.resize(1600, 850)
         main_layout = QHBoxLayout(self)
         self.setLayout(main_layout)
         controls_container = QWidget(self)
@@ -392,70 +393,124 @@ class RealTimeUSViewer(QWidget):
         controls_layout.setContentsMargins(4, 4, 4, 4)
         controls_layout.setSpacing(6)
         controls_container.setMaximumWidth(320)
+        
+        self.title = QLabel("Kaneko Lab - 3D US Reconstruction")
+        self.title.setStyleSheet("font-weight: bold; font-size: 16px;")
+        controls_layout.addWidget(self.title)
 
-        self.calib_stats_group = QWidget()
+        #--------------------------
+
+        self.calib_stats_group = QGroupBox("Calibration Status")
         stats_layout = QVBoxLayout(self.calib_stats_group)
-        stats_layout.setContentsMargins(5, 10, 5, 10)
-
-        stats_title = QLabel("<b>Calibration Status<b>")
-        stats_title.setStyleSheet("color: cyan;")
-        stats_layout.addWidget(stats_title)
-
+        self.us_label = QLabel("Ultrasound")
+        self.us_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.rms_label = QLabel("RMS Error: N/A")
-        self.rms_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.rms_label.setStyleSheet("font-weight: bold; font-size: 12px;")
         stats_layout.addWidget(self.rms_label)
-
         self.sample_count_label = QLabel("Samples: 0")
         stats_layout.addWidget(self.sample_count_label)
-
         self.calib_health_label = QLabel("Status: Not Calibrated")
         stats_layout.addWidget(self.calib_health_label)
 
+        self.needle_label = QLabel("Needle")
+        self.needle_pivot_status = QLabel("Pivot samples: 0 (idle)")
+        self.needle_pivot_status.setWordWrap(True)
+        stats_layout.addWidget(self.needle_pivot_status)
+
+        self.needle_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.place_needle_tip_btn = QPushButton("Add Needle Tip Marker")
+        self.place_needle_tip_btn.setStyleSheet("font-weight: normal;")
+        self.place_needle_tip_btn.clicked.connect(self.add_needle_tip_marker)
+        self.place_needle_tip_btn.setEnabled(False)
+        stats_layout.addWidget(self.place_needle_tip_btn)
+
         controls_layout.addWidget(self.calib_stats_group)
 
+
+        #-------------
+
+        self.us_calib_group = QGroupBox("Calibrate Ultrasound")
+        us_layout = QVBoxLayout(self.us_calib_group)
+        us_layout.setSpacing(10)
         self.simple_us_origin_btn = QPushButton("Set Ultrasound Origin")
         self.simple_us_origin_btn.clicked.connect(self.simple_set_ultrasound_origin)
         self.simple_us_origin_btn.setEnabled(True)
-        controls_layout.addWidget(self.simple_us_origin_btn)
-
-        self.simple_needle_origin_btn = QPushButton("Set Needle Origin")
-        self.simple_needle_origin_btn.clicked.connect(self.simple_set_needle_origin)
-        self.simple_needle_origin_btn.setEnabled(True)
-        controls_layout.addWidget(self.simple_needle_origin_btn)
-
-        self.reset_btn = QPushButton("Reset View")
-        self.reset_btn.clicked.connect(self.reset_view)
-        controls_layout.addWidget(self.reset_btn)
+        self.simple_us_origin_btn.setStyleSheet("font-weight: normal;")
+        us_layout.addWidget(self.simple_us_origin_btn)
 
         self.calibrate_us_btn = QPushButton("Calibrate Ultrasound Transform")
+        self.calibrate_us_btn.setStyleSheet("font-weight: normal;")
         self.calibrate_us_btn.clicked.connect(self.calibrate_ultrasound_transform)
         self.calibrate_us_btn.setEnabled(False)
-        controls_layout.addWidget(self.calibrate_us_btn)
+        us_layout.addWidget(self.calibrate_us_btn)
 
         self.reset_us_transform_btn = QPushButton("Reset Ultrasound Transform")
+        self.reset_us_transform_btn.setStyleSheet("font-weight: normal;")
         self.reset_us_transform_btn.clicked.connect(self.reset_ultrasound_transform)
-        controls_layout.addWidget(self.reset_us_transform_btn)
+        us_layout.addWidget(self.reset_us_transform_btn)
+
+        controls_layout.addWidget(self.us_calib_group)
+
+        #---------------
+
+        self.needle_calib_group = QGroupBox("Calibrate Needle")
+        needle_layout = QVBoxLayout(self.needle_calib_group)
+        needle_layout.setSpacing(10)
+
+        self.simple_needle_origin_btn = QPushButton("Set Needle Origin")
+        self.simple_needle_origin_btn.setStyleSheet("font-weight: normal;")
+        self.simple_needle_origin_btn.clicked.connect(self.simple_set_needle_origin)
+        self.simple_needle_origin_btn.setEnabled(True)
+        needle_layout.addWidget(self.simple_needle_origin_btn)
+
         self.needle_pivot_btn = QPushButton("Start Needle Pivot Calibration")
+        self.needle_pivot_btn.setStyleSheet("font-weight: normal;")
         self.needle_pivot_btn.setCheckable(True)
         self.needle_pivot_btn.toggled.connect(self.toggle_needle_pivot_calibration)
         self.needle_pivot_btn.setEnabled(False)
-        controls_layout.addWidget(self.needle_pivot_btn)
+        needle_layout.addWidget(self.needle_pivot_btn)
+
         self.clear_needle_tip_btn = QPushButton("Clear Needle Tip Calibration")
+        self.clear_needle_tip_btn.setStyleSheet("font-weight: normal;")
         self.clear_needle_tip_btn.clicked.connect(self.clear_needle_tip_calibration)
-        controls_layout.addWidget(self.clear_needle_tip_btn)
-        self.place_needle_tip_btn = QPushButton("Add Needle Tip Marker")
-        self.place_needle_tip_btn.clicked.connect(self.add_needle_tip_marker)
-        self.place_needle_tip_btn.setEnabled(False)
-        controls_layout.addWidget(self.place_needle_tip_btn)
-        self.load_calibration_btn = QPushButton("Load Calibration...")
-        self.load_calibration_btn.clicked.connect(self.load_calibrations)
-        controls_layout.addWidget(self.load_calibration_btn)
-        self.save_calibration_btn = QPushButton("Save Calibration...")
-        self.save_calibration_btn.clicked.connect(self.save_calibrations)
-        controls_layout.addWidget(self.save_calibration_btn)
-        self.needle_pivot_status = QLabel("Pivot samples: 0 (idle)")
-        self.needle_pivot_status.setWordWrap(True)
-        controls_layout.addWidget(self.needle_pivot_status)
+        needle_layout.addWidget(self.clear_needle_tip_btn)
+
+        controls_layout.addWidget(self.needle_calib_group)
+
+        # --------------------------
+
+        self.recon = QGroupBox("Reconstruct Volume")
+
+        recon_layout = QVBoxLayout(self.recon)
+        recon_layout.setSpacing(10)
+
+        self.recording = False
+        self.recorded_frames: List[Tuple[float, np.ndarray, Pose, Optional[Tuple[float, float]]]] = []
+        self.last_volume_zyx: Optional[np.ndarray] = None
+        self.last_weights_zyx: Optional[np.ndarray] = None
+        self.last_recon_meta: Optional[dict] = None
+        self.last_recon_affine: Optional[np.ndarray] = None
+        self.record_btn = QPushButton("Start Recording")
+        self.record_btn.setStyleSheet("font-weight: normal;")
+        self.record_btn.setCheckable(True)
+        self.record_btn.clicked.connect(self.toggle_recording)
+        recon_layout.addWidget(self.record_btn)
+        self.reconstruct_btn = QPushButton("Reconstruct Volume")
+        self.reconstruct_btn.setStyleSheet("font-weight: normal;")
+        self.reconstruct_btn.clicked.connect(self.reconstruct_volume_from_recording)
+        recon_layout.addWidget(self.reconstruct_btn)
+
+        self.recon_volume_chk = QCheckBox("Show Reconstructed Volume")
+        self.recon_volume_chk.setStyleSheet("font-weight: normal;")
+        self.recon_volume_chk.setChecked(False)
+        self.recon_volume_chk.setEnabled(False)
+        self.recon_volume_chk.stateChanged.connect(self.toggle_recon_volume)
+        recon_layout.addWidget(self.recon_volume_chk)
+
+        controls_layout.addWidget(self.recon)
+
+        #-----------------------
+
         self.us_arrow_chk = QCheckBox("Show Probe Arrow")
         self.us_arrow_chk.setChecked(True)
         self.us_arrow_chk.stateChanged.connect(self.toggle_probe_arrow)
@@ -468,9 +523,6 @@ class RealTimeUSViewer(QWidget):
         self.needle_slice_chk.setChecked(True)
         self.needle_slice_chk.stateChanged.connect(self.toggle_needle_slice_overlay)
         controls_layout.addWidget(self.needle_slice_chk)
-        self.rb_status_label = QLabel(f"Streaming rigid bodies:____")
-        self.rb_status_label.setWordWrap(True)
-        controls_layout.addWidget(self.rb_status_label)
         self.marker_chk = QCheckBox("Show Markers")
         self.marker_chk.setChecked(True)
         self.marker_chk.stateChanged.connect(self.toggle_markers)
@@ -483,32 +535,51 @@ class RealTimeUSViewer(QWidget):
         self.ultrasound_pane_chk.setChecked(False)
         self.ultrasound_pane_chk.stateChanged.connect(self.toggle_ultrasound_pane)
         controls_layout.addWidget(self.ultrasound_pane_chk)
-        self.recon_volume_chk = QCheckBox("Show Reconstructed Volume")
-        self.recon_volume_chk.setChecked(False)
-        self.recon_volume_chk.setEnabled(False)
-        self.recon_volume_chk.stateChanged.connect(self.toggle_recon_volume)
-        controls_layout.addWidget(self.recon_volume_chk)
+
+        #---------------
+
+        
+        self.features = QGroupBox("Other Features")
+        features_layout = QVBoxLayout(self.features)
+        features_layout.setSpacing(10)
+
+        self.rb_status_label = QLabel(f"Streaming rigid bodies:____")
+        self.rb_status_label.setWordWrap(True)
+        features_layout.addWidget(self.rb_status_label)
+
+        self.reset_btn = QPushButton("Reset View")
+        self.reset_btn.setStyleSheet("font-weight: normal;")
+        self.reset_btn.clicked.connect(self.reset_view)
+        features_layout.addWidget(self.reset_btn)
+
         self.axes_chk = QCheckBox("Show Axes")
+        self.axes_chk.setStyleSheet("font-weight: normal;")
         self.axes_chk.setChecked(False)
         self.axes_chk.stateChanged.connect(self.toggle_axes)
-        controls_layout.addWidget(self.axes_chk)
-        self.recording = False
-        self.recorded_frames: List[Tuple[float, np.ndarray, Pose, Optional[Tuple[float, float]]]] = []
-        self.last_volume_zyx: Optional[np.ndarray] = None
-        self.last_weights_zyx: Optional[np.ndarray] = None
-        self.last_recon_meta: Optional[dict] = None
-        self.last_recon_affine: Optional[np.ndarray] = None
-        self.record_btn = QPushButton("Start Recording")
-        self.record_btn.setCheckable(True)
-        self.record_btn.clicked.connect(self.toggle_recording)
-        controls_layout.addWidget(self.record_btn)
-        self.reconstruct_btn = QPushButton("Reconstruct Volume")
-        self.reconstruct_btn.clicked.connect(self.reconstruct_volume_from_recording)
-        controls_layout.addWidget(self.reconstruct_btn)
+        features_layout.addWidget(self.axes_chk)
 
+        self.load_calibration_btn = QPushButton("Load Calibration...")
+        self.load_calibration_btn.setStyleSheet("font-weight: normal;")
+        self.load_calibration_btn.clicked.connect(self.load_calibrations)
+        features_layout.addWidget(self.load_calibration_btn)
+
+        self.save_calibration_btn = QPushButton("Save Calibration...")
+        self.save_calibration_btn.setStyleSheet("font-weight: normal;")
+        self.save_calibration_btn.clicked.connect(self.save_calibrations)
+        features_layout.addWidget(self.save_calibration_btn)
+
+        controls_layout.addWidget(self.features)
+
+        # --------------------------
+    
+        self.quit = QGroupBox()
+        quit_layout = QVBoxLayout(self.quit)
         self.quit_btn = QPushButton("Quit")
         self.quit_btn.clicked.connect(self.quit_application)
-        controls_layout.addWidget(self.quit_btn)
+        quit_layout.addWidget(self.quit_btn)
+        controls_layout.addWidget(self.quit)
+
+        #-------------
 
         controls_layout.addStretch(1)
         main_layout.addWidget(controls_container, 0)
@@ -519,6 +590,7 @@ class RealTimeUSViewer(QWidget):
         self.grid = QGridLayout()
         main_container_layout.addLayout(self.grid)
         main_layout.addWidget(main_container, 1)
+
     def quit_application(self) -> None:
         self._perform_shutdown()
         app = QApplication.instance()
@@ -1751,6 +1823,10 @@ class RealTimeUSViewer(QWidget):
                 pts_h = np.concatenate([pts_m, np.ones((pts_m.shape[0], 1), dtype=np.float64)], axis=1)
                 world_pts = (s.pose_matrix.astype(np.float64) @ T_probe_image @ pts_h.T).T
                 dist = world_pts[:, :3] @ plane_normal + plane_offset_m
+
+                # print("DEBUG: First world pt:", world_pts[0, :3])
+                # print("DEBUG: Distance (mm):", dist[0] * 1000)
+
                 res_list.append(dist)
             if not res_list:
                 return np.zeros((1,), dtype=np.float64)
@@ -1845,6 +1921,10 @@ class RealTimeUSViewer(QWidget):
                 )
 
         self.us_correction_matrix = T_probe_image.astype(np.float32)
+
+        print("DEBUG: Pose translation:", s.pose_matrix[:3, 3])
+        # print("DEBUG: Plane normal:", plane_normal)
+
         return {
             "num_samples": len(samples),
             "num_points": total_points,
@@ -1857,12 +1937,9 @@ class RealTimeUSViewer(QWidget):
             "correction_matrix": self.us_correction_matrix.copy(),
             "frame_stats": frame_stats,
         }
+    
 
         
-        
-        
-
-
     def toggle_needle_pivot_calibration(self, checked: bool) -> None:
         if checked:
             if (
