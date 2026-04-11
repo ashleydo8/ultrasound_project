@@ -58,7 +58,7 @@ from qtpy.QtWidgets import (
 )
 
 USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = True        
+USE_FAKE_POSE = False        
 
 recording_buffer = RecordingBuffer()
 
@@ -308,8 +308,14 @@ class RealTimeUSViewer(QWidget):
             self.volume = (np.random.rand(*VOLUME_SHAPE) * 255).astype(np.float32)
         else:
             self.volume = volume
+
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
+        self.us_correction_matrix[:3, :3] = SIMPLE_US_ROT_MAT_REV.astype(np.float32)
+        rot = R.from_euler('z', 22, degrees=True).as_matrix()
+        self.us_correction_matrix[:3, :3] = self.us_correction_matrix[:3, :3] @ rot
+        self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
+        self.needle_correction_matrix[:3, :3] = R.from_euler('x', 180, degrees=True).as_matrix() #ensure dir is correct 
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
         self._last_raw_pos_m: Optional[np.ndarray] = None
@@ -375,8 +381,9 @@ class RealTimeUSViewer(QWidget):
         self._timer.timeout.connect(self.update_frame)
         self._timer.start(interval)
         self._closed = False
+        
     def _init_ui(self) -> None:
-        self.setWindowTitle(f"Real-time US Viewer ({GUI_FPS} Hz)")
+        self.setWindowTitle(f"Kaneko Lab - US Viewer ({GUI_FPS} Hz)")
         self.resize(1200, 800)
         main_layout = QHBoxLayout(self)
         self.setLayout(main_layout)
@@ -385,21 +392,46 @@ class RealTimeUSViewer(QWidget):
         controls_layout.setContentsMargins(4, 4, 4, 4)
         controls_layout.setSpacing(6)
         controls_container.setMaximumWidth(320)
+
+        self.calib_stats_group = QWidget()
+        stats_layout = QVBoxLayout(self.calib_stats_group)
+        stats_layout.setContentsMargins(5, 10, 5, 10)
+
+        stats_title = QLabel("<b>Calibration Status<b>")
+        stats_title.setStyleSheet("color: cyan;")
+        stats_layout.addWidget(stats_title)
+
+        self.rms_label = QLabel("RMS Error: N/A")
+        self.rms_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        stats_layout.addWidget(self.rms_label)
+
+        self.sample_count_label = QLabel("Samples: 0")
+        stats_layout.addWidget(self.sample_count_label)
+
+        self.calib_health_label = QLabel("Status: Not Calibrated")
+        stats_layout.addWidget(self.calib_health_label)
+
+        controls_layout.addWidget(self.calib_stats_group)
+
+        self.simple_us_origin_btn = QPushButton("Set Ultrasound Origin")
+        self.simple_us_origin_btn.clicked.connect(self.simple_set_ultrasound_origin)
+        self.simple_us_origin_btn.setEnabled(True)
+        controls_layout.addWidget(self.simple_us_origin_btn)
+
+        self.simple_needle_origin_btn = QPushButton("Set Needle Origin")
+        self.simple_needle_origin_btn.clicked.connect(self.simple_set_needle_origin)
+        self.simple_needle_origin_btn.setEnabled(True)
+        controls_layout.addWidget(self.simple_needle_origin_btn)
+
         self.reset_btn = QPushButton("Reset View")
         self.reset_btn.clicked.connect(self.reset_view)
         controls_layout.addWidget(self.reset_btn)
+
         self.calibrate_us_btn = QPushButton("Calibrate Ultrasound Transform")
         self.calibrate_us_btn.clicked.connect(self.calibrate_ultrasound_transform)
         self.calibrate_us_btn.setEnabled(False)
         controls_layout.addWidget(self.calibrate_us_btn)
-        self.simple_us_origin_btn = QPushButton("Simple: Origin @0 (face +X)")
-        self.simple_us_origin_btn.clicked.connect(self.simple_calibrate_ultrasound_origin)
-        self.simple_us_origin_btn.setEnabled(False)
-        controls_layout.addWidget(self.simple_us_origin_btn)
-        self.simple_us_orient_btn = QPushButton("Simple: Origin @0 (face -X)")
-        self.simple_us_orient_btn.clicked.connect(self.simple_calibrate_ultrasound_flipped)
-        self.simple_us_orient_btn.setEnabled(False)
-        controls_layout.addWidget(self.simple_us_orient_btn)
+
         self.reset_us_transform_btn = QPushButton("Reset Ultrasound Transform")
         self.reset_us_transform_btn.clicked.connect(self.reset_ultrasound_transform)
         controls_layout.addWidget(self.reset_us_transform_btn)
@@ -424,9 +456,6 @@ class RealTimeUSViewer(QWidget):
         self.needle_pivot_status = QLabel("Pivot samples: 0 (idle)")
         self.needle_pivot_status.setWordWrap(True)
         controls_layout.addWidget(self.needle_pivot_status)
-        self.quit_btn = QPushButton("Quit")
-        self.quit_btn.clicked.connect(self.quit_application)
-        controls_layout.addWidget(self.quit_btn)
         self.us_arrow_chk = QCheckBox("Show Probe Arrow")
         self.us_arrow_chk.setChecked(True)
         self.us_arrow_chk.stateChanged.connect(self.toggle_probe_arrow)
@@ -476,6 +505,11 @@ class RealTimeUSViewer(QWidget):
         self.reconstruct_btn = QPushButton("Reconstruct Volume")
         self.reconstruct_btn.clicked.connect(self.reconstruct_volume_from_recording)
         controls_layout.addWidget(self.reconstruct_btn)
+
+        self.quit_btn = QPushButton("Quit")
+        self.quit_btn.clicked.connect(self.quit_application)
+        controls_layout.addWidget(self.quit_btn)
+
         controls_layout.addStretch(1)
         main_layout.addWidget(controls_container, 0)
         main_container = QWidget(self)
@@ -500,10 +534,6 @@ class RealTimeUSViewer(QWidget):
         #for a napari surface: (vertices, faces, values)
         return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
     
-    def load_needle_mesh(self,path):
-        mesh = self.meshio.read(path)
-        return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
-
     def _init_viewers_and_layers(self) -> None:
         # 3D viewer
         model3d = ViewerModel(ndisplay=3)
@@ -533,9 +563,7 @@ class RealTimeUSViewer(QWidget):
         ultrasound_layout.addWidget(ultrasound_label)
         ultrasound_layout.addWidget(ultrasound_qt)
         ultrasound_qt.show()
-        # self.grid.addWidget(self.ultrasound_container, 0, 2, 1, 1)
-        # self.grid.setRowStretch(0, 2)
-        # self.grid.setRowStretch(1, 1)
+      
         self._ultrasound_frame = np.zeros(UltrasoundImage.US_2D_SHAPE, dtype=np.float32)
         self.ultrasound_image_layer = self.ultrasound_model.add_image(
             self._ultrasound_frame,
@@ -661,7 +689,6 @@ class RealTimeUSViewer(QWidget):
         )
 
         self.probe_mesh_data = self.load_probe_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\probe.stl")
-        self.needle_mesh_data = self.load_needle_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\needle.stl")
 
         self.probe_layer = self.model3d.add_surface(
             self.probe_mesh_data,
@@ -917,9 +944,12 @@ class RealTimeUSViewer(QWidget):
             pose_matrix = self._pose_to_matrix(pos_arr, raw_rot)
             if self._us_calibration_recording:
                 self._capture_ultrasound_calibration_sample(packet.frame_ts, frame2d, pose_matrix)
-            corrected_matrix = pose_matrix @ self.us_correction_matrix
+        
+            calibrated_pose = pose_matrix @ self.us_correction_matrix
+            corrected_matrix = self.world_origin_offset @ calibrated_pose
             probe_matrix = corrected_matrix
             probe_translation = probe_matrix.copy()
+
             orientation_correction = R.from_euler('y', 90, degrees=True).as_matrix()
             probe_orientation = np.eye(4) 
             probe_orientation[:3,:3] = orientation_correction
@@ -1434,6 +1464,7 @@ class RealTimeUSViewer(QWidget):
                 self.ultrasound_model.reset_view()
             except Exception as e:
                 logger.warning("Error resetting live ultrasound view: %s", e, exc_info=True)
+
     def calibrate_ultrasound_transform(self) -> None:
         if not self._us_calibration_recording:
             if self._last_raw_pos_m is None or self._last_raw_rot is None:
@@ -1442,6 +1473,7 @@ class RealTimeUSViewer(QWidget):
             self._us_calibration_recording = True
             self._us_calibration_last_ts = None
             self._us_calibration_samples.clear()
+
             self.calibrate_us_btn.setText("Stop Ultrasound Calibration")
             logger.info("Ultrasound calibration recording started. Sweep the planar phantom.")
         else:
@@ -1449,8 +1481,28 @@ class RealTimeUSViewer(QWidget):
             self.calibrate_us_btn.setText("Calibrate Ultrasound Transform")
             try:
                 result = self._solve_ultrasound_calibration()
+
+                rms = result.get('rms_mm', "n/a")
+                count = result.get('num_samples', "n/a")
+                        
+                self.rms_label.setText(f"RMS Error: {rms:.4f} mm")
+                self.sample_count_label.setText(f"Samples: {count}")
+                
+                if rms < 1.0:
+                    self.rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
+                    self.calib_health_label.setText("Status: Good Alignment")
+                elif rms < 2.5:
+                    self.rms_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 14px;") # Yellow
+                    self.calib_health_label.setText("Status: Acceptable")
+                else:
+                    self.rms_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;") # Red
+                    self.calib_health_label.setText("Status: Poor Alignment")
+
+                self._last_us_calibration_result = result
+
             except Exception:
                 logger.exception("Ultrasound calibration solve failed.")
+
                 QMessageBox.critical(
                     self,
                     "Ultrasound Calibration Failed",
@@ -1458,6 +1510,7 @@ class RealTimeUSViewer(QWidget):
                 )
                 self._clear_ultrasound_calibration_samples()
                 return
+            
             if result is None:
                 QMessageBox.warning(
                     self,
@@ -1467,6 +1520,7 @@ class RealTimeUSViewer(QWidget):
                 self._clear_ultrasound_calibration_samples()
                 return
             self._last_us_calibration_result = result
+
             tilt_text = (
                 f"{result['tilt_degrees']:.2f}°" if result.get("tilt_degrees") is not None else "n/a"
             )
@@ -1475,6 +1529,7 @@ class RealTimeUSViewer(QWidget):
                 spacing_text = f"{spacing_text[0]:.4f}, {spacing_text[1]:.4f} mm/px"
             else:
                 spacing_text = "unknown"
+
             summary_lines = [
                 f"Samples: {result['num_samples']} (points: {result.get('num_points', 0)})",
                 f"Residual RMS: {result['rms_mm']:.3f} mm (max {result['max_abs_mm']:.3f} mm)",
@@ -1482,6 +1537,7 @@ class RealTimeUSViewer(QWidget):
                 f"Pose spread: {result.get('spread_xy_mm', 0.0):.1f} mm, tilt span {result.get('tilt_span_deg', 0.0):.1f}°",
                 f"Pixel spacing used: {spacing_text}",
             ]
+
             QMessageBox.information(
                 self,
                 "Ultrasound Calibration Complete",
@@ -1494,70 +1550,31 @@ class RealTimeUSViewer(QWidget):
                 result["max_abs_mm"],
             )
             self._clear_ultrasound_calibration_samples()
+
     def reset_ultrasound_transform(self) -> None:
         # Ultrasound calibration: T_probe_image (image -> probe); identity until calibrated.
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
         logger.info("Ultrasound transform reset to identity.")
         self._clear_ultrasound_calibration_samples()
 
-    def _apply_simple_us_calibration(self, rot_matrix: np.ndarray, label: str) -> None:
-        """
-        Quick calibration: force the ultrasound plane to lie in the YZ plane with rows pointing
-        down toward -Y, and anchor the top-middle pixel at the world origin.
-        """
-        if self._last_raw_pos_m is None or self._last_raw_rot is None:
-            logger.warning("Simple ultrasound calibration requires an active ultrasound pose.")
-            QMessageBox.warning(
-                self,
-                "Simple Calibration",
-                "No ultrasound pose is available. Wait for tracking before applying the simple calibration.",
-            )
-            return
-        T_probe = np.eye(4, dtype=np.float64)
-        try:
-            T_probe[:3, :3] = self._last_raw_rot.as_matrix().astype(np.float64)
-        except Exception:
-            logger.exception("Failed to build probe rotation for simple calibration.")
-            return
-        try:
-            T_probe[:3, 3] = np.asarray(self._last_raw_pos_m, dtype=np.float64).reshape(3)
-        except Exception:
-            logger.exception("Failed to build probe translation for simple calibration.")
-            return
-        T_target = np.eye(4, dtype=np.float64)
-        T_target[:3, :3] = rot_matrix
-        try:
-            T_probe_inv = np.linalg.inv(T_probe)
-        except np.linalg.LinAlgError:
-            logger.error("Simple ultrasound calibration failed: probe pose is not invertible.")
-            return
-        correction = T_probe_inv @ T_target
-        self.us_correction_matrix = correction.astype(np.float32)
-        self._clear_ultrasound_calibration_samples()
-        normal = rot_matrix[:, 2]
-        x_axis = rot_matrix[:, 0]
-        y_axis = rot_matrix[:, 1]
-        logger.info(
-            "Applied simple ultrasound calibration [%s]. x->(%.2f, %.2f, %.2f), y->(%.2f, %.2f, %.2f), normal=(%.2f, %.2f, %.2f), origin @ (0,0,0).",
-            label,
-            float(x_axis[0]),
-            float(x_axis[1]),
-            float(x_axis[2]),
-            float(y_axis[0]),
-            float(y_axis[1]),
-            float(y_axis[2]),
-            float(normal[0]),
-            float(normal[1]),
-            float(normal[2]),
-        )
+    def simple_set_ultrasound_origin(self) -> None:
+        if self._last_raw_pos_m is not None and self._last_raw_rot is not None:
+            current_calibrated_pose = self._pose_to_matrix(self._last_raw_pos_m, self._last_raw_rot) @ self.us_correction_matrix
+            self.world_origin_offset = np.eye(4, dtype=np.float32)
+            self.world_origin_offset[:3, 3] = -current_calibrated_pose[:3, 3]
 
-    def simple_calibrate_ultrasound_origin(self) -> None:
-        """Anchor at (0,0,0) with normal +X (faces forward), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_FWD, label="face +Y")
+    def simple_set_needle_origin(self):
+        if self._last_raw_needle_pos_m is not None and self._last_raw_needle_rot is not None:
 
-    def simple_calibrate_ultrasound_flipped(self) -> None:
-        """Anchor at (0,0,0) with normal -X (flipped), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_REV, label="face -Y")
+            current_inv_rot = self._last_raw_needle_rot.inv().as_matrix()
+            current_inv_trans = -current_inv_rot @ self._last_raw_needle_pos_m
+            
+            self.needle_correction_matrix = np.eye(4)
+            self.needle_correction_matrix[:3, :3] = current_inv_rot
+            self.needle_correction_matrix[:3, 3] = current_inv_trans
+    
+        logger.info("Needle origin calibrated to current pose.")
+
 
     def _detect_plane_points(self, frame: np.ndarray, max_points: int = 200) -> np.ndarray:
         """
@@ -1715,6 +1732,7 @@ class RealTimeUSViewer(QWidget):
             )
         plane_normal = self._plane_normal
         plane_offset_m = self._plane_offset_m
+        
 
         def _params_to_matrix(params: np.ndarray) -> np.ndarray:
             rot = R.from_rotvec(params[:3]).as_matrix()
@@ -1839,6 +1857,12 @@ class RealTimeUSViewer(QWidget):
             "correction_matrix": self.us_correction_matrix.copy(),
             "frame_stats": frame_stats,
         }
+
+        
+        
+        
+
+
     def toggle_needle_pivot_calibration(self, checked: bool) -> None:
         if checked:
             if (
