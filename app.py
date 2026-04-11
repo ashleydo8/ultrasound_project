@@ -398,6 +398,34 @@ class RealTimeUSViewer(QWidget):
         self.title.setStyleSheet("font-weight: bold; font-size: 16px;")
         controls_layout.addWidget(self.title)
 
+
+        #-----------------------
+
+        self.us_arrow_chk = QCheckBox("Show Probe Arrow")
+        self.us_arrow_chk.setChecked(True)
+        self.us_arrow_chk.stateChanged.connect(self.toggle_probe_arrow)
+        controls_layout.addWidget(self.us_arrow_chk)
+        self.needle_arrow_chk = QCheckBox("Show Needle Line")
+        self.needle_arrow_chk.setChecked(True)
+        self.needle_arrow_chk.stateChanged.connect(self.toggle_needle_arrow)
+        controls_layout.addWidget(self.needle_arrow_chk)
+        self.needle_slice_chk = QCheckBox("Show Needle on Slices")
+        self.needle_slice_chk.setChecked(True)
+        self.needle_slice_chk.stateChanged.connect(self.toggle_needle_slice_overlay)
+        controls_layout.addWidget(self.needle_slice_chk)
+        self.marker_chk = QCheckBox("Show Markers")
+        self.marker_chk.setChecked(True)
+        self.marker_chk.stateChanged.connect(self.toggle_markers)
+        controls_layout.addWidget(self.marker_chk)
+        self.ultrasound_chk = QCheckBox("Show Ultrasound Overlays")
+        self.ultrasound_chk.setChecked(True)
+        self.ultrasound_chk.stateChanged.connect(self.toggle_ultrasound)
+        controls_layout.addWidget(self.ultrasound_chk)
+        self.ultrasound_pane_chk = QCheckBox("Show Ultrasound Pane")
+        self.ultrasound_pane_chk.setChecked(False)
+        self.ultrasound_pane_chk.stateChanged.connect(self.toggle_ultrasound_pane)
+        controls_layout.addWidget(self.ultrasound_pane_chk)
+
         #--------------------------
 
         self.calib_stats_group = QGroupBox("Calibration Status")
@@ -508,33 +536,6 @@ class RealTimeUSViewer(QWidget):
         recon_layout.addWidget(self.recon_volume_chk)
 
         controls_layout.addWidget(self.recon)
-
-        #-----------------------
-
-        self.us_arrow_chk = QCheckBox("Show Probe Arrow")
-        self.us_arrow_chk.setChecked(True)
-        self.us_arrow_chk.stateChanged.connect(self.toggle_probe_arrow)
-        controls_layout.addWidget(self.us_arrow_chk)
-        self.needle_arrow_chk = QCheckBox("Show Needle Line")
-        self.needle_arrow_chk.setChecked(True)
-        self.needle_arrow_chk.stateChanged.connect(self.toggle_needle_arrow)
-        controls_layout.addWidget(self.needle_arrow_chk)
-        self.needle_slice_chk = QCheckBox("Show Needle on Slices")
-        self.needle_slice_chk.setChecked(True)
-        self.needle_slice_chk.stateChanged.connect(self.toggle_needle_slice_overlay)
-        controls_layout.addWidget(self.needle_slice_chk)
-        self.marker_chk = QCheckBox("Show Markers")
-        self.marker_chk.setChecked(True)
-        self.marker_chk.stateChanged.connect(self.toggle_markers)
-        controls_layout.addWidget(self.marker_chk)
-        self.ultrasound_chk = QCheckBox("Show Ultrasound Overlays")
-        self.ultrasound_chk.setChecked(True)
-        self.ultrasound_chk.stateChanged.connect(self.toggle_ultrasound)
-        controls_layout.addWidget(self.ultrasound_chk)
-        self.ultrasound_pane_chk = QCheckBox("Show Ultrasound Pane")
-        self.ultrasound_pane_chk.setChecked(False)
-        self.ultrasound_pane_chk.stateChanged.connect(self.toggle_ultrasound_pane)
-        controls_layout.addWidget(self.ultrasound_pane_chk)
 
         #---------------
 
