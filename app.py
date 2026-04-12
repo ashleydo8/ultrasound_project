@@ -318,6 +318,7 @@ class RealTimeUSViewer(QWidget):
         self.needle_correction_matrix[:3, :3] = R.from_euler('xyz', [180,0,0], degrees=True).as_matrix() #ensure dir is correct 
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
+        self.pivot_rms = 0.0 
         self._last_raw_pos_m: Optional[np.ndarray] = None
         self._last_raw_rot: Optional[R] = None
         self._last_raw_needle_pos_m: Optional[np.ndarray] = None
@@ -390,11 +391,11 @@ class RealTimeUSViewer(QWidget):
         controls_container = QWidget(self)
         controls_layout = QVBoxLayout(controls_container)
         controls_layout.setContentsMargins(4, 4, 4, 4)
-        controls_layout.setSpacing(6)
+        controls_layout.setSpacing(3)
         controls_container.setMaximumWidth(320)
         
         self.title = QLabel("Kaneko Lab - 3D US Reconstruction")
-        self.title.setStyleSheet("font-weight: bold; font-size: 16px;")
+        self.title.setStyleSheet("font-weight: bold; font-size: 14px;")
         controls_layout.addWidget(self.title)
 
 
@@ -429,27 +430,40 @@ class RealTimeUSViewer(QWidget):
 
         self.calib_stats_group = QGroupBox("Calibration Status")
         stats_layout = QVBoxLayout(self.calib_stats_group)
-        self.us_label = QLabel("Ultrasound")
-        self.us_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.rms_label = QLabel("RMS Error: N/A")
-        self.rms_label.setStyleSheet("font-weight: bold; font-size: 12px;")
-        stats_layout.addWidget(self.rms_label)
-        self.sample_count_label = QLabel("Samples: 0")
-        stats_layout.addWidget(self.sample_count_label)
-        self.calib_health_label = QLabel("Status: Not Calibrated")
-        stats_layout.addWidget(self.calib_health_label)
 
-        self.needle_label = QLabel("Needle")
-        self.needle_pivot_status = QLabel("Pivot samples: 0 (idle)")
+        self.us_group = QGroupBox("Ultrasound Probe")
+        us_group_layout = QVBoxLayout(self.us_group)
+        self.us_rms_label = QLabel("US RMS Error: N/A")
+        self.us_rms_label.setStyleSheet("font-weight: bold; font-size: 10px;")
+        us_group_layout.addWidget(self.us_rms_label)
+        self.sample_count_label = QLabel("US Samples: 0")
+        us_group_layout.addWidget(self.sample_count_label)
+        self.us_calib_health_label = QLabel("Status: US Not Calibrated")
+        us_group_layout.addWidget(self.us_calib_health_label)
+        stats_layout.addWidget(self.us_group)
+
+        self.needle_group = QGroupBox("Needle")
+        needle_layout = QVBoxLayout(self.needle_group)
+
+        self.rms_label = QLabel("Needle RMS Error: N/A")
+        self.rms_label.setStyleSheet("font-weight: bold; font-size: 10px;")
+        needle_layout.addWidget(self.rms_label)
+
+
+        self.needle_pivot_status = QLabel("Needle Pivot Samples: 0 (idle)")
         self.needle_pivot_status.setWordWrap(True)
-        stats_layout.addWidget(self.needle_pivot_status)
+        needle_layout.addWidget(self.needle_pivot_status)
 
-        self.needle_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.needle_calib_health_label = QLabel("Status: Needle Not Calibrated")
+        needle_layout.addWidget(self.needle_calib_health_label)
+
         self.place_needle_tip_btn = QPushButton("Add Needle Tip Marker")
         self.place_needle_tip_btn.setStyleSheet("font-weight: normal;")
         self.place_needle_tip_btn.clicked.connect(self.add_needle_tip_marker)
         self.place_needle_tip_btn.setEnabled(False)
-        stats_layout.addWidget(self.place_needle_tip_btn)
+        needle_layout.addWidget(self.place_needle_tip_btn)
+        stats_layout.addWidget(self.needle_group) 
+
 
         controls_layout.addWidget(self.calib_stats_group)
 
@@ -1557,18 +1571,18 @@ class RealTimeUSViewer(QWidget):
                 rms = result.get('rms_mm', "n/a")
                 count = result.get('num_samples', "n/a")
                         
-                self.rms_label.setText(f"RMS Error: {rms:.4f} mm")
+                self.us_rms_label.setText(f"RMS Error: {rms:.4f} mm")
                 self.sample_count_label.setText(f"Samples: {count}")
                 
                 if rms < 1.0:
                     self.rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
-                    self.calib_health_label.setText("Status: Good Alignment")
+                    self.us_calib_health_label.setText("Status: Good US Alignment")
                 elif rms < 2.5:
                     self.rms_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 14px;") # Yellow
-                    self.calib_health_label.setText("Status: Acceptable")
+                    self.us_calib_health_label.setText("Status: Acceptable US Alignment")
                 else:
                     self.rms_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;") # Red
-                    self.calib_health_label.setText("Status: Poor Alignment")
+                    self.us_calib_health_label.setText("Status: Poor US Alignment")
 
                 self._last_us_calibration_result = result
 
@@ -2024,6 +2038,23 @@ class RealTimeUSViewer(QWidget):
             if summary:
                 logger.info(summary)
             rms = result.get("rms_mm")
+
+            self.pivot_rms = rms 
+
+            self.rms_label.setText(f"RMS Error: {rms:.4f} mm")
+            
+            if self.pivot_rms is not None:
+
+                if rms < 1.0:
+                    self.rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
+                    self.needle_calib_health_label.setText("Status: Good Needle Alignment")
+                elif rms < 2.5:
+                    self.rms_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 14px;") # Yellow
+                    self.needle_calib_health_label.setText("Status: Acceptable Needle Alignment")
+                else:
+                    self.rms_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;") # Red
+                    self.needle_calib_health_label.setText("Status: Poor Needle Alignment")
+
             if isinstance(rms, (int, float)):
                 self._update_needle_pivot_status(f"RMS {rms:.2f} mm")
             else:
