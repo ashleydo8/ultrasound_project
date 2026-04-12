@@ -30,7 +30,7 @@ import psutil
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import least_squares
 from core.recon import reconstruct_volume_from_frames
-from core.calibration import NeedlePivotCalibrator
+from core.calibration import NeedlePivotCalibrator, _project_to_so3
 from core.structures import Pose, Event, RenderPacket, RecordingBuffer
 from core.spatial import Pose
 from ui.viewer import UltrasoundCalibrationSample, on_pivot_start, on_pivot_capture, on_pivot_solve
@@ -59,7 +59,7 @@ from qtpy.QtWidgets import (
 )
 
 USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = True        
+USE_FAKE_POSE = False         
 
 recording_buffer = RecordingBuffer()
 
@@ -312,11 +312,10 @@ class RealTimeUSViewer(QWidget):
 
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
         self.us_correction_matrix[:3, :3] = SIMPLE_US_ROT_MAT_REV.astype(np.float32)
-        rot = R.from_euler('z', 22, degrees=True).as_matrix()
-        self.us_correction_matrix[:3, :3] = self.us_correction_matrix[:3, :3] @ rot
+
         self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
-        self.needle_correction_matrix[:3, :3] = R.from_euler('x', 180, degrees=True).as_matrix() #ensure dir is correct 
+        self.needle_correction_matrix[:3, :3] = R.from_euler('xyz', [180,0,0], degrees=True).as_matrix() #ensure dir is correct 
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
         self._last_raw_pos_m: Optional[np.ndarray] = None
@@ -1635,8 +1634,10 @@ class RealTimeUSViewer(QWidget):
             current_calibrated_pose = self._pose_to_matrix(self._last_raw_pos_m, self._last_raw_rot) @ self.us_correction_matrix
             self.world_origin_offset = np.eye(4, dtype=np.float32)
             self.world_origin_offset[:3, 3] = -current_calibrated_pose[:3, 3]
+            # print(f"DEBUG: origin: {self.world_origin_offset[:3, 0], self.world_origin_offset[:3, 1], self.world_origin_offset[:3, 2]}")
 
     def simple_set_needle_origin(self):
+        
         if self._last_raw_needle_pos_m is not None and self._last_raw_needle_rot is not None:
 
             current_inv_rot = self._last_raw_needle_rot.inv().as_matrix()
@@ -1645,6 +1646,17 @@ class RealTimeUSViewer(QWidget):
             self.needle_correction_matrix = np.eye(4)
             self.needle_correction_matrix[:3, :3] = current_inv_rot
             self.needle_correction_matrix[:3, 3] = current_inv_trans
+
+            T_fixed = np.eye(4, dtype=np.float32)
+            frame_fix = R.from_euler('y', 180, degrees=True).as_matrix()
+            T_fixed[:3, :3] = frame_fix
+            self.needle_correction_matrix = T_fixed @ self.needle_correction_matrix
+
+            # current_rot = self._last_raw_needle_rot.as_matrix()
+            # current_rot = _project_to_so3(current_rot)
+            # self.needle_correction_matrix = np.eye(4)
+            # self.needle_correction_matrix[:3, :3] = current_rot
+            # self.needle_correction_matrix[:3, 3] = self._last_raw_needle_pos_m
     
         logger.info("Needle origin calibrated to current pose.")
 
@@ -1896,6 +1908,8 @@ class RealTimeUSViewer(QWidget):
                 )
 
         T_probe_image = _params_to_matrix(params)
+        
+        
         overall_residuals_mm = _residuals(params, samples) * SCALE
         rms_mm = float(np.sqrt(np.mean(overall_residuals_mm**2)))
         max_abs_mm = float(np.max(np.abs(overall_residuals_mm)))
@@ -1921,9 +1935,35 @@ class RealTimeUSViewer(QWidget):
                     np.degrees(np.arccos(np.clip(np.dot(mean_normal, plane_normal), -1.0, 1.0)))
                 )
 
-        self.us_correction_matrix = T_probe_image.astype(np.float32)
+        # new_correction = T_probe_image.astype(np.float32)
+        # self.us_correction_matrix = self.world_origin_offset @ new_correction
+        
+        # raw_calib_mtx = T_probe_image.astype(np.float32)
+        arrow_adj_mat = np.eye(4)
+        arrow_adj = R.from_euler('xyz',[0,90,180], degrees=True).as_matrix()
+        # T_arrow_fix = np.eye(4)
+        # T_arrow_fix[:3, :3] = arrow_adj
+        # corrected_calib = raw_calib_mtx @ T_arrow_fix
+        # before_table_offset = self.world_origin_offset @ corrected_calib
+        # offset_5cm = np.eye(4, dtype=np.float32)
+        # offset_5cm[2, 3] = 0.05  # 5 cm in z-direction
+        # offset_5cm[1, 3] = 0.05
+        # self.us_correction_matrix = before_table_offset @ offset_5cm
 
-        print("DEBUG: Pose translation:", s.pose_matrix[:3, 3])
+        current_inv_rot = self._last_raw_rot.inv().as_matrix()
+        current_inv_trans = -current_inv_rot @ self._last_raw_pos_m
+        
+        self.us_correction_matrix[:3, :3] = current_inv_rot
+        
+        arrow_adj_mat[:3, :3] = arrow_adj
+        self.us_correction_matrix[:3, 3] = current_inv_trans
+        self.us_correction_matrix = self.world_origin_offset @ self.us_correction_matrix
+        self.us_correction_matrix = self.us_correction_matrix @ arrow_adj_mat
+
+        #reset
+        self.world_origin_offset = np.eye(4, dtype=np.float32)
+
+        # print("DEBUG: Pose translation:", s.pose_matrix[:3, 3])
         # print("DEBUG: Plane normal:", plane_normal)
 
         return {
@@ -1939,8 +1979,6 @@ class RealTimeUSViewer(QWidget):
             "frame_stats": frame_stats,
         }
     
-
-        
     def toggle_needle_pivot_calibration(self, checked: bool) -> None:
         if checked:
             if (
