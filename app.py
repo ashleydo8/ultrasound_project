@@ -30,7 +30,7 @@ import psutil
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import least_squares
 from core.recon import reconstruct_volume_from_frames
-from core.calibration import NeedlePivotCalibrator, _project_to_so3
+from core.calibration import NeedlePivotCalibrator
 from core.structures import Pose, Event, RenderPacket, RecordingBuffer
 from core.spatial import Pose
 from ui.viewer import UltrasoundCalibrationSample, on_pivot_start, on_pivot_capture, on_pivot_solve
@@ -292,6 +292,9 @@ def consumer_main(
         stop_event.set()
 
 class RealTimeUSViewer(QWidget):
+
+    needle_prev_solved = False 
+
     def __init__(
         self,
         frame_q: queue.Queue,
@@ -316,11 +319,11 @@ class RealTimeUSViewer(QWidget):
 
         #works but computationally expensiveand leads to freezing 
         # self.ghost_slices = []
-        # self.max_ghosts = 30
+        # self.max_ghosts = 30 
 
         self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
-        self.needle_correction_matrix[:3, :3] = R.from_euler('xyz', [180,0,0], degrees=True).as_matrix() #ensure dir is correct 
+        self.needle_correction_matrix[:3, :3] = self.needle_correction_matrix[:3,:3] @ R.from_euler('y', 135, degrees=True).as_matrix()
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
         self.pivot_rms = 0.0 
@@ -692,6 +695,9 @@ class RealTimeUSViewer(QWidget):
             face_color='white', 
             blending='additive',
         )
+
+        self.grid.setRowStretch(0, 3) 
+        self.grid.setRowStretch(1, 1) 
 
         # 2D slice viewers
         self.slice_viewers = {}
@@ -1722,28 +1728,29 @@ class RealTimeUSViewer(QWidget):
             # print(f"DEBUG: origin: {self.world_origin_offset[:3, 0], self.world_origin_offset[:3, 1], self.world_origin_offset[:3, 2]}")
 
     def simple_set_needle_origin(self):
-        
         if self._last_raw_needle_pos_m is not None and self._last_raw_needle_rot is not None:
-
-            # current_inv_rot = self._last_raw_needle_rot.inv().as_matrix()
-            # current_inv_trans = -current_inv_rot @ self._last_raw_needle_pos_m
+          
+            current_inv_rot = self._last_raw_needle_rot.inv().as_matrix()
             
-            # self.needle_correction_matrix = np.eye(4)
-            # self.needle_correction_matrix[:3, :3] = current_inv_rot
-            # self.needle_correction_matrix[:3, 3] = current_inv_trans 
 
-            # T_fixed = np.eye(4, dtype=np.float32)
+            current_inv_trans = -current_inv_rot @ self._last_raw_needle_pos_m
+            
+            base_correction = np.eye(4)
+            base_correction[:3, :3] = current_inv_rot
+            base_correction[:3, 3] = current_inv_trans 
+
+            T_fixed = np.eye(4, dtype=np.float32)
             # frame_fix = R.from_euler('y', 180, degrees=True).as_matrix()
             # T_fixed[:3, :3] = frame_fix
-            # self.needle_correction_matrix = T_fixed @ self.needle_correction_matrix
+        
+        self.needle_correction_matrix = T_fixed @ base_correction
 
-            current_rot = self._last_raw_needle_rot.as_matrix()
-            current_rot = _project_to_so3(current_rot)
-            self.needle_correction_matrix = np.eye(4)
-            self.needle_correction_matrix[:3, :3] = current_rot
-            self.needle_correction_matrix[:3, 3] = self._last_raw_needle_pos_m
-    
-            logger.info("Needle origin calibrated to current pose.")
+        if RealTimeUSViewer.needle_prev_solved == True: 
+            self.needle_correction_matrix[1,3] = self.needle_correction_matrix[1,3] + 0.12 #y offset corection 
+
+        
+        logger.info("Needle origin calibrated to current pose.")
+
 
     def _detect_plane_points(self, frame: np.ndarray, max_points: int = 200) -> np.ndarray:
         """
@@ -2096,6 +2103,7 @@ class RealTimeUSViewer(QWidget):
                 self._update_needle_pivot_status("error")
                 return
             self._pivot_capture_count = _needle_pivot_calibrator.num_samples()
+            RealTimeUSViewer.needle_prev_solved = True
             summary = result.get("summary")
             if summary:
                 logger.info(summary)
@@ -2204,9 +2212,6 @@ class RealTimeUSViewer(QWidget):
             "Applied needle tip transform to 3D viewer (offset: %s).",
             np.array2string(tip_vec_mm, precision=4),
         )
-
-
-        self.simple_set_needle_origin() 
 
     def clear_needle_tip_calibration(self) -> None:
         global _last_tip_offset_mm
