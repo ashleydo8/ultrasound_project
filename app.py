@@ -40,6 +40,8 @@ from ui.constants import VOLUME_SHAPE, ULTRASOUND_RB_ID,ASSUMED_US_PIXEL_SPACING
 from ui.constants import NEEDLE_RB_ID, LOCAL_ARROW_DIR, NEEDLE_ARROW_LENGTH_MM, RECORDINGS_DIR, PIXEL_SPACING_MM, SIMPLE_US_ROT_MAT_FWD, SIMPLE_US_ROT_MAT_REV
 from ui.constants import SCALE, _needle_pivot_calibrator, CALIBRATIONS_DIR, SLICE_THICKNESS_MM, QUEUE_MAXSIZE, TRACKER_CLIENT_ADDRESS, TRACKER_SERVER_ADDRESS, TRACKER_USE_MULTICAST, TRACKER_PRINT_LEVEL
 
+from ui.constants import COLOR_GREEN, COLOR_RED, COLOR_YELLOW
+
 # IMPORTANT: On Windows, importing Qt *before* hardware DLLs can cause crashes or device enumeration failures.
 # Always import all hardware dependencies (e.g., ultrasound, NatNet) FIRST!
 
@@ -316,10 +318,12 @@ class RealTimeUSViewer(QWidget):
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
         self.us_correction_matrix[:3, :3] = SIMPLE_US_ROT_MAT_REV.astype(np.float32)
 
-
         #works but computationally expensiveand leads to freezing 
         # self.ghost_slices = []
         # self.max_ghosts = 30 
+
+        self.grid_density = 0.1 ##mm 
+        self.occupancy_grid = defaultdict(int)
 
         self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
@@ -692,9 +696,13 @@ class RealTimeUSViewer(QWidget):
             name='Scan Trail',
             ndim=3, 
             size=4, 
-            face_color='white', 
             blending='additive',
         )
+
+        self.model3d.text_overlay.visible = True
+        self.model3d.text_overlay.position = 'top_left'
+        self.model3d.text_overlay.color = 'white'
+        self.model3d.text_overlay.font_size = 16
 
         self.grid.setRowStretch(0, 3) 
         self.grid.setRowStretch(1, 1) 
@@ -1211,19 +1219,93 @@ class RealTimeUSViewer(QWidget):
             #         self.model3d.layers.remove(old_layer)
 
             #points logic 
+            # if self.recording:
+            #     point_colors = []
+            #     current_pos_mm = T[:3, 3] 
+            #     should_add = False
+            #     if len(self.scan_trail_layer.data) == 0:
+            #         should_add = True
+            #     else:
+            #         last_pos = self.scan_trail_layer.data[-1]
+            #         dist = np.linalg.norm(current_pos_mm - last_pos)
+            #         if dist > 2.0:  # Only add a point every 2mm of movement
+            #             should_add = True 
+            #     if should_add:
+            #         self.scan_trail_layer.add(current_pos_mm[np.newaxis, :])
+
+
             if self.recording:
+
                 current_pos_mm = T[:3, 3] 
                 should_add = False
+                
                 if len(self.scan_trail_layer.data) == 0:
                     should_add = True
                 else:
                     last_pos = self.scan_trail_layer.data[-1]
                     dist = np.linalg.norm(current_pos_mm - last_pos)
-                    if dist > 2.0:  # Only add a point every 2mm of movement
+                    if dist > 2.0:
                         should_add = True 
-                if should_add:
-                    self.scan_trail_layer.add(current_pos_mm[np.newaxis, :])
 
+                if should_add:
+
+                    grid_resolution = 10.0 #10mm
+                    grid_coord = tuple((current_pos_mm / grid_resolution).astype(int))
+
+                    self.occupancy_grid[grid_coord] += 1
+                    hits = self.occupancy_grid[grid_coord]
+
+                    if hits < 4:
+                        new_color = COLOR_RED 
+                    elif hits < 8:
+                        new_color = COLOR_YELLOW 
+                    else:
+                        new_color = COLOR_GREEN
+
+                        #to account for rgba: shape is (1,4) 
+                        # (number of points, number of color channels)
+
+                    self.scan_trail_layer.add(current_pos_mm[np.newaxis, :])
+                    
+                    #get full array of existing colors 
+                    all_colors = self.scan_trail_layer.face_color
+
+                    all_colors[-1] = new_color.flatten() #overwrite white with specific density color 
+                    self.scan_trail_layer.face_color = all_colors
+
+                    num_frames = len(self.recorded_frames)
+                    num_points = len(self.scan_trail_layer.data)
+
+
+                    green_def = COLOR_GREEN.flatten() 
+
+                    is_green = np.all(all_colors == green_def, axis=1)
+                    green_count = np.sum(is_green)
+
+                    if len(all_colors) > 0:
+
+                        total_num_points = len(all_colors)
+                        green_ratio = green_count / total_num_points 
+                        status = green_ratio * 100
+
+                        # if green_ratio > 0.8:
+                        #     status = "At least 80% coverage. Volume scan complete. "
+                        # elif green_ratio > 0.4: 
+                        #     status = "At least 40% coverage. Continue scanning."
+                        # else:
+                        #     status = "Less than 40% coverage. Continue scanning."
+
+                    self.model3d.text_overlay.text = (
+                        f"Mode: Recording...\n"
+                        f"Frames: {num_frames}\n"
+                        F"Status: {int(status)}% sufficient coverage."
+                    )
+            else: 
+                self.model3d.text_overlay.text = (
+                    f"Mode: Idle\n"
+                    f"Begin Scanning."
+                )
+                    
             # --- Markers ---
             n_markers = len(markers_list)
             if n_markers > self._max_markers:
@@ -1528,7 +1610,12 @@ class RealTimeUSViewer(QWidget):
         #             self.model3d.layers.remove(layer)
         #     self.ghost_slices.clear()
 
+
+        #clear all the points when reconstructing volume 
+
         self.scan_trail_layer.data = np.zeros((0, 3), dtype=np.float32) #clear points layer 
+        self.scan_trail_layer.face_color = np.zeros((0, 4), dtype=np.float32) #clear colors 
+        self.occupancy_grid.clear() 
 
         self.last_volume_zyx = vol
         self.last_weights_zyx = weights
@@ -2040,8 +2127,11 @@ class RealTimeUSViewer(QWidget):
         
         arrow_adj_mat[:3, :3] = arrow_adj
         self.us_correction_matrix[:3, 3] = current_inv_trans
-        self.us_correction_matrix = self.world_origin_offset @ self.us_correction_matrix
-        self.us_correction_matrix = self.us_correction_matrix @ arrow_adj_mat
+        # self.us_correction_matrix = self.world_origin_offset @ self.us_correction_matrix
+        # self.us_correction_matrix = self.us_correction_matrix @ arrow_adj_mat
+        
+        self.us_correction_matrix = self.world_origin_offset @ arrow_adj_mat @ self.us_correction_matrix
+
 
         #reset
         # self.world_origin_offset = np.eye(4, dtype=np.float32)
