@@ -61,7 +61,7 @@ from qtpy.QtWidgets import (
 )
 
 USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = False         
+USE_FAKE_POSE = True         
 
 recording_buffer = RecordingBuffer()
 
@@ -704,10 +704,11 @@ class RealTimeUSViewer(QWidget):
         self.model3d.text_overlay.color = 'white'
         self.model3d.text_overlay.font_size = 16
 
-        self.grid.setRowStretch(0, 3) 
-        self.grid.setRowStretch(1, 1) 
+        # self.grid.setRowStretch(0, 3) 
+        # self.grid.setRowStretch(1, 1) 
 
         # 2D slice viewers
+
         self.slice_viewers = {}
         self.slice_layers = {}
         plane_keys = ['axial', 'coronal', 'sagittal']
@@ -736,6 +737,16 @@ class RealTimeUSViewer(QWidget):
             img = Image(self.volume, name=key.capitalize())
             pts = Points(np.zeros((self._max_markers, 2), dtype=np.float32), name=f"{key}_pt", size=8)
             vec = Vectors(np.zeros((1, 2, 2), dtype=np.float32), name=f"{key}_vec", vector_style="arrow", edge_width=2.0)
+           
+            needle_pts = Points(
+                np.zeros((0, 2), dtype=np.float32),
+                name=f"{key}_needle",
+                size=14,
+                face_color="cyan",
+            )
+            
+            model2d.add_layer(needle_pts)
+           
             if hasattr(self, "us_arrow_chk"):
                 vec.visible = self.us_arrow_chk.isChecked()
             row_axis, col_axis = self._slice_axes_indices(key)
@@ -755,6 +766,7 @@ class RealTimeUSViewer(QWidget):
                 "img": img,
                 "pts": pts,
                 "probe_vec": vec,
+                "needle": needle_pts,
                 "axes": (row_axis, col_axis),
             }
             self.recon_slice_layers[key] = None
@@ -1321,9 +1333,48 @@ class RealTimeUSViewer(QWidget):
                     self.marker_layer.data = self.marker_data[:n_markers]
             else:
                 self.marker_layer.data = np.zeros((0, 3), dtype=np.float32)
+
+            
+            # --- have slice index follow the needle -- # 
+
+            if self._current_needle_pose is not None:
+
+                tip = self._current_needle_pose.pos_mm
+
+                if np.all(np.isfinite(tip)):
+                    voxel = self._mm_to_voxel(tip)
+
+                    for key, viewer in self.slice_viewers.items():
+                        model2d = viewer["model"]
+                        axis = SLICE_AXES[key]
+                        try:
+                            model2d.dims.set_point(axis, voxel[axis])
+                        except Exception:
+                            pass
+
             # --- 2D overlays ---
+
             for key, viewer in self.slice_viewers.items():
                 layers = self.slice_layers[key]
+                
+                needle_layer = layers.get("needle")
+
+                if needle_layer is not None and self._current_needle_pose is not None:
+
+                    tip = self._current_needle_pose.pos_mm
+
+                    if np.all(np.isfinite(tip)):
+                        try:
+                            pt2d = self.project_to_slice(key, tip)
+                            needle_layer.data = np.array([pt2d], dtype=np.float32)
+                            print(self._current_needle_pose)
+                            print(tip)
+                            print(self.project_to_slice(key,tip))
+                            print(layers.keys())
+                            
+                        except Exception:
+                            needle_layer.data = np.zeros((0, 2), dtype=np.float32)
+
                 pts_layer = layers["pts"]
                 model2d = viewer["model"]
                 axis = SLICE_AXES[key]
@@ -1357,6 +1408,13 @@ class RealTimeUSViewer(QWidget):
         if key == "sagittal":
             return 0, 1
         raise ValueError(f"Unknown slice key: {key}")
+    
+    def _mm_to_voxel(self, pt_mm):
+        return [
+            pt_mm[i] / float(self._voxel_size_mm[i])
+            for i in range(3)
+        ]
+
     def _clamp_slice_index(self, model: ViewerModel, axis: int) -> float:
         volume = getattr(self, "volume", None)
         if isinstance(volume, np.ndarray):
@@ -1647,36 +1705,52 @@ class RealTimeUSViewer(QWidget):
             np.array2string(meta["origin_mm"], precision=3),
             nonzero,
         )
+    
     def _update_recon_slice_layers(self, volume: np.ndarray) -> None:
-        if not hasattr(self, "recon_slice_layers"):
-            self.recon_slice_layers = {}
-        affine = (
-            self.last_recon_affine
-            if self.last_recon_affine is not None
-            else np.eye(4, dtype=np.float32)
-        )
-        visible = self.recon_volume_chk.isChecked() if hasattr(self, "recon_volume_chk") else True
-        for key, viewer in self.slice_viewers.items():
-            model2d = viewer["model"]
-            layer = self.recon_slice_layers.get(key)
-            if layer is None:
-                layer = Image(
-                    volume,
-                    name=f"{key.capitalize()} Recon",
-                    colormap="gray",
-                    opacity=0.6,
-                    blending="translucent",
-                    visible=visible,
-                    affine=affine,
-                )
-                model2d.add_layer(layer)
-                self.recon_slice_layers[key] = layer
-            else:
-                layer.data = volume
-                layer.affine = affine
-                layer.visible = visible
-            if hasattr(layer, "reset_contrast_limits"):
-                layer.reset_contrast_limits()
+        if volume is None:
+            return 
+    
+        #store volume 
+        self.volume = volume 
+
+        center = [s // 2 for s in volume.shape]
+        
+        #contrast limits 
+        try:
+            vmin, vmax = np.percentile(volume,(1,99))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin, vmax = float(np.min(volume)), float(np.max(volume))
+        except Exception:
+            vmin, vmax = float(np.min(volume)), float(np.max(volume))
+
+        # #center the volume in all slices 
+        # for key, viewer in self.slice_viewers.items():
+
+        #     model2d = viewer["model"]
+
+        #     try:
+        #         displayed = list(model2d.dims.displayed)
+        #         all_axes = list(range(len(volume.shape)))
+
+        #         slicing_axes = [ax for ax in all_axes if ax not in displayed]
+        #         for ax in slicing_axes:
+        #             model2d.dims.set_point(ax, center[ax])
+
+        #     except Exception as e:
+        #         print("ERROR in", key, ":", e)
+
+        
+        #update slice layers 
+        for key, layers in self.slice_layers.items():
+            
+            img_layer = layers.get("img", None)
+            if img_layer is None: 
+                continue 
+
+            img_layer.data = volume 
+            img_layer.contrast_limits = (vmin, vmax)
+
+
     @staticmethod
     def _build_recon_affine(meta: dict) -> np.ndarray:
         voxel = float(meta.get("voxel_size_mm", 1.0))
