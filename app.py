@@ -60,8 +60,8 @@ from qtpy.QtWidgets import (
     QMessageBox,
 )
 
-USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = True         
+USE_FAKE_ULTRASOUND = False   
+USE_FAKE_POSE = False         
 
 recording_buffer = RecordingBuffer()
 
@@ -327,7 +327,7 @@ class RealTimeUSViewer(QWidget):
 
         self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
-        self.needle_correction_matrix[:3, :3] = self.needle_correction_matrix[:3,:3] @ R.from_euler('y', 135, degrees=True).as_matrix()
+        self.needle_correction_matrix[:3, :3] = self.needle_correction_matrix[:3,:3] @ R.from_euler('yz', [135, 90], degrees=True).as_matrix()
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
         self.pivot_rms = 0.0 
@@ -448,8 +448,8 @@ class RealTimeUSViewer(QWidget):
         self.us_rms_label = QLabel("US RMS Error: N/A")
         self.us_rms_label.setStyleSheet("font-weight: bold; font-size: 12px;")
         us_group_layout.addWidget(self.us_rms_label)
-        self.sample_count_label = QLabel("US Samples: 0")
-        us_group_layout.addWidget(self.sample_count_label)
+        self.us_sample_count_label = QLabel("US Samples: 0 ")
+        us_group_layout.addWidget(self.us_sample_count_label)
         self.us_calib_health_label = QLabel("Status: US Not Calibrated")
         us_group_layout.addWidget(self.us_calib_health_label)
         stats_layout.addWidget(self.us_group)
@@ -740,13 +740,11 @@ class RealTimeUSViewer(QWidget):
            
             needle_pts = Points(
                 np.zeros((0, 2), dtype=np.float32),
-                name=f"{key}_needle",
-                size=14,
+                name="needle",
+                size=12,
                 face_color="cyan",
             )
-            
-            model2d.add_layer(needle_pts)
-           
+
             if hasattr(self, "us_arrow_chk"):
                 vec.visible = self.us_arrow_chk.isChecked()
             row_axis, col_axis = self._slice_axes_indices(key)
@@ -770,6 +768,8 @@ class RealTimeUSViewer(QWidget):
                 "axes": (row_axis, col_axis),
             }
             self.recon_slice_layers[key] = None
+
+            model2d.add_layer(needle_pts) #add last so we can see it first 
 
         # 3D overlay layers
         vec_width = 6.0
@@ -856,6 +856,12 @@ class RealTimeUSViewer(QWidget):
         )
         if hasattr(self.needle_tip_layer, "edge_color"):
             self.needle_tip_layer.edge_color = 'white'
+
+        for key in self.slice_layers:
+            needle_layer = self.slice_layers[key]['needle']
+            self.slice_viewers[key]['model'].layers.move(self.slice_viewers[key]['model'].layers.index(needle_layer), -1)
+        #ensuring that the needle point is at the top-most layer 
+
     def _apply_camera_defaults(self) -> None:
         """Configure the 3D napari camera to the preferred baseline view."""
         if self.model3d is None:
@@ -1349,6 +1355,7 @@ class RealTimeUSViewer(QWidget):
                         axis = SLICE_AXES[key]
                         try:
                             model2d.dims.set_point(axis, voxel[axis])
+                            # print("following needle in slices")
                         except Exception:
                             pass
 
@@ -1367,16 +1374,13 @@ class RealTimeUSViewer(QWidget):
                         try:
                             pt2d = self.project_to_slice(key, tip)
                             needle_layer.data = np.array([pt2d], dtype=np.float32)
-                            print(self._current_needle_pose)
-                            print(tip)
-                            print(self.project_to_slice(key,tip))
-                            print(layers.keys())
                             
                         except Exception:
                             needle_layer.data = np.zeros((0, 2), dtype=np.float32)
 
                 pts_layer = layers["pts"]
                 model2d = viewer["model"]
+
                 axis = SLICE_AXES[key]
                 slice_idx = self._clamp_slice_index(model2d, axis)
                 slice_mm = slice_idx * float(self._voxel_size_mm[axis])
@@ -1467,8 +1471,12 @@ class RealTimeUSViewer(QWidget):
         if self.needle_tip_layer is not None:
             data = np.asarray(self._needle_tip_points, dtype=np.float32)
             self.needle_tip_layer.data = data
+
     def toggle_needle_slice_overlay(self, state: int) -> None:
-        _ = state
+        visible = bool(state)
+        for key in self.slice_layers:
+            self.slice_layers[key]["needle"].visible = visible
+
     def toggle_markers(self, state: int) -> None:
         visible = bool(state)
         self.marker_layer.visible = visible
@@ -1786,6 +1794,7 @@ class RealTimeUSViewer(QWidget):
                 logger.warning("Error resetting live ultrasound view: %s", e, exc_info=True)
 
     def calibrate_ultrasound_transform(self) -> None:
+
         if not self._us_calibration_recording:
             if self._last_raw_pos_m is None or self._last_raw_rot is None:
                 logger.warning("Cannot start ultrasound calibration without a recent pose.")
@@ -1793,6 +1802,8 @@ class RealTimeUSViewer(QWidget):
             self._us_calibration_recording = True
             self._us_calibration_last_ts = None
             self._us_calibration_samples.clear()
+            self.us_sample_count_label.setText(f"US Samples: {len(self._us_calibration_samples)}")
+
 
             self.calibrate_us_btn.setText("Stop Ultrasound Calibration")
             logger.info("Ultrasound calibration recording started. Sweep the planar phantom.")
@@ -1806,7 +1817,7 @@ class RealTimeUSViewer(QWidget):
                 count = result.get('num_samples', "n/a")
                         
                 self.us_rms_label.setText(f"RMS Error: {rms:.4f} mm")
-                self.sample_count_label.setText(f"Samples: {count}")
+                self.us_sample_count_label.setText(f"Samples: {count}")
                 
                 if rms < 1.0:
                     self.us_rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
@@ -1872,6 +1883,7 @@ class RealTimeUSViewer(QWidget):
                 result["rms_mm"],
                 result["max_abs_mm"],
             )
+
             self._clear_ultrasound_calibration_samples()
 
     def reset_ultrasound_transform(self) -> None:
