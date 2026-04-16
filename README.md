@@ -1,4 +1,5 @@
-# Project Structure 
+# Kaneko Lab - 3D Ultrasound Volume Reconstruction from 2D Slices Application
+## Project Structure 
 
 ## core/
 *Responsible for the mathematical heavy-lifting and spatial logic.*
@@ -44,9 +45,14 @@ graph TD
 
 1. Clarius firmware is 12.2.1.
    
-3. Cast Binary Release used is 12.2.0 (for Mac Intel core)
+2. Cast Binary Release used is 12.2.0 (for Mac Intel core)
    
-5. dependencies include: pyclariuscast.so, libcast.dylib
+3. dependencies include: pyclariuscast.so, libcast.dylib
+
+## Acknowledgements 
+
+Thank you to Dr. Naoki Kaneko for providing the resources and support to complete this project. 
+
 
 
 
