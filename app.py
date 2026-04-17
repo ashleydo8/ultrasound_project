@@ -40,6 +40,8 @@ from ui.constants import VOLUME_SHAPE, ULTRASOUND_RB_ID,ASSUMED_US_PIXEL_SPACING
 from ui.constants import NEEDLE_RB_ID, LOCAL_ARROW_DIR, NEEDLE_ARROW_LENGTH_MM, RECORDINGS_DIR, PIXEL_SPACING_MM, SIMPLE_US_ROT_MAT_FWD, SIMPLE_US_ROT_MAT_REV
 from ui.constants import SCALE, _needle_pivot_calibrator, CALIBRATIONS_DIR, SLICE_THICKNESS_MM, QUEUE_MAXSIZE, TRACKER_CLIENT_ADDRESS, TRACKER_SERVER_ADDRESS, TRACKER_USE_MULTICAST, TRACKER_PRINT_LEVEL
 
+from ui.constants import COLOR_GREEN, COLOR_RED, COLOR_YELLOW
+
 # IMPORTANT: On Windows, importing Qt *before* hardware DLLs can cause crashes or device enumeration failures.
 # Always import all hardware dependencies (e.g., ultrasound, NatNet) FIRST!
 
@@ -47,6 +49,7 @@ from qtpy.QtCore import QTimer, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -57,8 +60,8 @@ from qtpy.QtWidgets import (
     QMessageBox,
 )
 
-USE_FAKE_ULTRASOUND = True   
-USE_FAKE_POSE = True        
+USE_FAKE_ULTRASOUND = False   
+USE_FAKE_POSE = False         
 
 recording_buffer = RecordingBuffer()
 
@@ -291,6 +294,9 @@ def consumer_main(
         stop_event.set()
 
 class RealTimeUSViewer(QWidget):
+
+    needle_prev_solved = False 
+
     def __init__(
         self,
         frame_q: queue.Queue,
@@ -308,10 +314,23 @@ class RealTimeUSViewer(QWidget):
             self.volume = (np.random.rand(*VOLUME_SHAPE) * 255).astype(np.float32)
         else:
             self.volume = volume
+
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
+        self.us_correction_matrix[:3, :3] = SIMPLE_US_ROT_MAT_REV.astype(np.float32)
+
+        #works but computationally expensiveand leads to freezing 
+        # self.ghost_slices = []
+        # self.max_ghosts = 30 
+
+        self.grid_density = 0.1 ##mm 
+        self.occupancy_grid = defaultdict(int)
+
+        self.world_origin_offset = np.eye(4, dtype=np.float32)
         self.needle_correction_matrix = np.eye(4, dtype=np.float32)
+        self.needle_correction_matrix[:3, :3] = self.needle_correction_matrix[:3,:3] @ R.from_euler('yz', [135, 90], degrees=True).as_matrix()
         self._needle_tip_matrix: Optional[np.ndarray] = None
         self._needle_tip_offset: Optional[np.ndarray] = None
+        self.pivot_rms = 0.0 
         self._last_raw_pos_m: Optional[np.ndarray] = None
         self._last_raw_rot: Optional[R] = None
         self._last_raw_needle_pos_m: Optional[np.ndarray] = None
@@ -375,58 +394,25 @@ class RealTimeUSViewer(QWidget):
         self._timer.timeout.connect(self.update_frame)
         self._timer.start(interval)
         self._closed = False
+        
     def _init_ui(self) -> None:
-        self.setWindowTitle(f"Real-time US Viewer ({GUI_FPS} Hz)")
-        self.resize(1200, 800)
+        self.setWindowTitle(f"Kaneko Lab - US Reconstruction ({GUI_FPS} Hz)")
+        self.resize(1600, 850)
         main_layout = QHBoxLayout(self)
         self.setLayout(main_layout)
         controls_container = QWidget(self)
         controls_layout = QVBoxLayout(controls_container)
         controls_layout.setContentsMargins(4, 4, 4, 4)
-        controls_layout.setSpacing(6)
+        controls_layout.setSpacing(3)
         controls_container.setMaximumWidth(320)
-        self.reset_btn = QPushButton("Reset View")
-        self.reset_btn.clicked.connect(self.reset_view)
-        controls_layout.addWidget(self.reset_btn)
-        self.calibrate_us_btn = QPushButton("Calibrate Ultrasound Transform")
-        self.calibrate_us_btn.clicked.connect(self.calibrate_ultrasound_transform)
-        self.calibrate_us_btn.setEnabled(False)
-        controls_layout.addWidget(self.calibrate_us_btn)
-        self.simple_us_origin_btn = QPushButton("Simple: Origin @0 (face +X)")
-        self.simple_us_origin_btn.clicked.connect(self.simple_calibrate_ultrasound_origin)
-        self.simple_us_origin_btn.setEnabled(False)
-        controls_layout.addWidget(self.simple_us_origin_btn)
-        self.simple_us_orient_btn = QPushButton("Simple: Origin @0 (face -X)")
-        self.simple_us_orient_btn.clicked.connect(self.simple_calibrate_ultrasound_flipped)
-        self.simple_us_orient_btn.setEnabled(False)
-        controls_layout.addWidget(self.simple_us_orient_btn)
-        self.reset_us_transform_btn = QPushButton("Reset Ultrasound Transform")
-        self.reset_us_transform_btn.clicked.connect(self.reset_ultrasound_transform)
-        controls_layout.addWidget(self.reset_us_transform_btn)
-        self.needle_pivot_btn = QPushButton("Start Needle Pivot Calibration")
-        self.needle_pivot_btn.setCheckable(True)
-        self.needle_pivot_btn.toggled.connect(self.toggle_needle_pivot_calibration)
-        self.needle_pivot_btn.setEnabled(False)
-        controls_layout.addWidget(self.needle_pivot_btn)
-        self.clear_needle_tip_btn = QPushButton("Clear Needle Tip Calibration")
-        self.clear_needle_tip_btn.clicked.connect(self.clear_needle_tip_calibration)
-        controls_layout.addWidget(self.clear_needle_tip_btn)
-        self.place_needle_tip_btn = QPushButton("Add Needle Tip Marker")
-        self.place_needle_tip_btn.clicked.connect(self.add_needle_tip_marker)
-        self.place_needle_tip_btn.setEnabled(False)
-        controls_layout.addWidget(self.place_needle_tip_btn)
-        self.load_calibration_btn = QPushButton("Load Calibration...")
-        self.load_calibration_btn.clicked.connect(self.load_calibrations)
-        controls_layout.addWidget(self.load_calibration_btn)
-        self.save_calibration_btn = QPushButton("Save Calibration...")
-        self.save_calibration_btn.clicked.connect(self.save_calibrations)
-        controls_layout.addWidget(self.save_calibration_btn)
-        self.needle_pivot_status = QLabel("Pivot samples: 0 (idle)")
-        self.needle_pivot_status.setWordWrap(True)
-        controls_layout.addWidget(self.needle_pivot_status)
-        self.quit_btn = QPushButton("Quit")
-        self.quit_btn.clicked.connect(self.quit_application)
-        controls_layout.addWidget(self.quit_btn)
+        
+        self.title = QLabel("Kaneko Lab - 3D US Reconstruction")
+        self.title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        controls_layout.addWidget(self.title)
+
+
+        #-----------------------
+
         self.us_arrow_chk = QCheckBox("Show Probe Arrow")
         self.us_arrow_chk.setChecked(True)
         self.us_arrow_chk.stateChanged.connect(self.toggle_probe_arrow)
@@ -439,9 +425,6 @@ class RealTimeUSViewer(QWidget):
         self.needle_slice_chk.setChecked(True)
         self.needle_slice_chk.stateChanged.connect(self.toggle_needle_slice_overlay)
         controls_layout.addWidget(self.needle_slice_chk)
-        self.rb_status_label = QLabel(f"Streaming rigid bodies:____")
-        self.rb_status_label.setWordWrap(True)
-        controls_layout.addWidget(self.rb_status_label)
         self.marker_chk = QCheckBox("Show Markers")
         self.marker_chk.setChecked(True)
         self.marker_chk.stateChanged.connect(self.toggle_markers)
@@ -454,15 +437,106 @@ class RealTimeUSViewer(QWidget):
         self.ultrasound_pane_chk.setChecked(False)
         self.ultrasound_pane_chk.stateChanged.connect(self.toggle_ultrasound_pane)
         controls_layout.addWidget(self.ultrasound_pane_chk)
-        self.recon_volume_chk = QCheckBox("Show Reconstructed Volume")
-        self.recon_volume_chk.setChecked(False)
-        self.recon_volume_chk.setEnabled(False)
-        self.recon_volume_chk.stateChanged.connect(self.toggle_recon_volume)
-        controls_layout.addWidget(self.recon_volume_chk)
-        self.axes_chk = QCheckBox("Show Axes")
-        self.axes_chk.setChecked(False)
-        self.axes_chk.stateChanged.connect(self.toggle_axes)
-        controls_layout.addWidget(self.axes_chk)
+
+        #--------------------------
+
+        self.calib_stats_group = QGroupBox("Calibration Status")
+        stats_layout = QVBoxLayout(self.calib_stats_group)
+
+        self.us_group = QGroupBox("Ultrasound Probe")
+        us_group_layout = QVBoxLayout(self.us_group)
+        self.us_rms_label = QLabel("US RMS Error: N/A")
+        self.us_rms_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        us_group_layout.addWidget(self.us_rms_label)
+        self.us_sample_count_label = QLabel("US Samples: 0 ")
+        us_group_layout.addWidget(self.us_sample_count_label)
+        self.us_calib_health_label = QLabel("Status: US Not Calibrated")
+        us_group_layout.addWidget(self.us_calib_health_label)
+        stats_layout.addWidget(self.us_group)
+
+        self.needle_group = QGroupBox("Needle")
+        needle_layout = QVBoxLayout(self.needle_group)
+
+        self.needle_rms_label = QLabel("Needle RMS Error: N/A")
+        self.needle_rms_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        needle_layout.addWidget(self.needle_rms_label)
+
+
+        self.needle_pivot_status = QLabel("Needle Pivot Samples: 0 (idle)")
+        self.needle_pivot_status.setWordWrap(True)
+        needle_layout.addWidget(self.needle_pivot_status)
+
+        self.needle_calib_health_label = QLabel("Status: Needle Not Calibrated")
+        needle_layout.addWidget(self.needle_calib_health_label)
+
+        self.place_needle_tip_btn = QPushButton("Add Needle Tip Marker")
+        self.place_needle_tip_btn.setStyleSheet("font-weight: normal;")
+        self.place_needle_tip_btn.clicked.connect(self.add_needle_tip_marker)
+        self.place_needle_tip_btn.setEnabled(False)
+        needle_layout.addWidget(self.place_needle_tip_btn)
+        stats_layout.addWidget(self.needle_group) 
+
+
+        controls_layout.addWidget(self.calib_stats_group)
+
+
+        #-------------
+
+        self.us_calib_group = QGroupBox("Calibrate Ultrasound")
+        us_layout = QVBoxLayout(self.us_calib_group)
+        us_layout.setSpacing(10)
+        self.simple_us_origin_btn = QPushButton("Set Ultrasound Origin")
+        self.simple_us_origin_btn.clicked.connect(self.simple_set_ultrasound_origin)
+        self.simple_us_origin_btn.setEnabled(True)
+        self.simple_us_origin_btn.setStyleSheet("font-weight: normal;")
+        us_layout.addWidget(self.simple_us_origin_btn)
+
+        self.calibrate_us_btn = QPushButton("Calibrate Ultrasound Transform")
+        self.calibrate_us_btn.setStyleSheet("font-weight: normal;")
+        self.calibrate_us_btn.clicked.connect(self.calibrate_ultrasound_transform)
+        self.calibrate_us_btn.setEnabled(False)
+        us_layout.addWidget(self.calibrate_us_btn)
+
+        self.reset_us_transform_btn = QPushButton("Reset Ultrasound Transform")
+        self.reset_us_transform_btn.setStyleSheet("font-weight: normal;")
+        self.reset_us_transform_btn.clicked.connect(self.reset_ultrasound_transform)
+        us_layout.addWidget(self.reset_us_transform_btn)
+
+        controls_layout.addWidget(self.us_calib_group)
+
+        #---------------
+
+        self.needle_calib_group = QGroupBox("Calibrate Needle")
+        needle_layout = QVBoxLayout(self.needle_calib_group)
+        needle_layout.setSpacing(10)
+
+        self.simple_needle_origin_btn = QPushButton("Set Needle Origin")
+        self.simple_needle_origin_btn.setStyleSheet("font-weight: normal;")
+        self.simple_needle_origin_btn.clicked.connect(self.simple_set_needle_origin)
+        self.simple_needle_origin_btn.setEnabled(True)
+        needle_layout.addWidget(self.simple_needle_origin_btn)
+
+        self.needle_pivot_btn = QPushButton("Start Needle Pivot Calibration")
+        self.needle_pivot_btn.setStyleSheet("font-weight: normal;")
+        self.needle_pivot_btn.setCheckable(True)
+        self.needle_pivot_btn.toggled.connect(self.toggle_needle_pivot_calibration)
+        self.needle_pivot_btn.setEnabled(False)
+        needle_layout.addWidget(self.needle_pivot_btn)
+
+        self.clear_needle_tip_btn = QPushButton("Clear Needle Tip Calibration")
+        self.clear_needle_tip_btn.setStyleSheet("font-weight: normal;")
+        self.clear_needle_tip_btn.clicked.connect(self.clear_needle_tip_calibration)
+        needle_layout.addWidget(self.clear_needle_tip_btn)
+
+        controls_layout.addWidget(self.needle_calib_group)
+
+        # --------------------------
+
+        self.recon = QGroupBox("Reconstruct Volume")
+
+        recon_layout = QVBoxLayout(self.recon)
+        recon_layout.setSpacing(10)
+
         self.recording = False
         self.recorded_frames: List[Tuple[float, np.ndarray, Pose, Optional[Tuple[float, float]]]] = []
         self.last_volume_zyx: Optional[np.ndarray] = None
@@ -470,12 +544,69 @@ class RealTimeUSViewer(QWidget):
         self.last_recon_meta: Optional[dict] = None
         self.last_recon_affine: Optional[np.ndarray] = None
         self.record_btn = QPushButton("Start Recording")
+        self.record_btn.setStyleSheet("font-weight: normal;")
         self.record_btn.setCheckable(True)
         self.record_btn.clicked.connect(self.toggle_recording)
-        controls_layout.addWidget(self.record_btn)
+        recon_layout.addWidget(self.record_btn)
         self.reconstruct_btn = QPushButton("Reconstruct Volume")
+        self.reconstruct_btn.setStyleSheet("font-weight: normal;")
         self.reconstruct_btn.clicked.connect(self.reconstruct_volume_from_recording)
-        controls_layout.addWidget(self.reconstruct_btn)
+        recon_layout.addWidget(self.reconstruct_btn)
+
+        self.recon_volume_chk = QCheckBox("Show Reconstructed Volume")
+        self.recon_volume_chk.setStyleSheet("font-weight: normal;")
+        self.recon_volume_chk.setChecked(False)
+        self.recon_volume_chk.setEnabled(False)
+        self.recon_volume_chk.stateChanged.connect(self.toggle_recon_volume)
+        recon_layout.addWidget(self.recon_volume_chk)
+
+        controls_layout.addWidget(self.recon)
+
+        #---------------
+
+        
+        self.features = QGroupBox("Other Features")
+        features_layout = QVBoxLayout(self.features)
+        features_layout.setSpacing(10)
+
+        self.rb_status_label = QLabel(f"Streaming rigid bodies:____")
+        self.rb_status_label.setWordWrap(True)
+        features_layout.addWidget(self.rb_status_label)
+
+        self.reset_btn = QPushButton("Reset View")
+        self.reset_btn.setStyleSheet("font-weight: normal;")
+        self.reset_btn.clicked.connect(self.reset_view)
+        features_layout.addWidget(self.reset_btn)
+
+        self.axes_chk = QCheckBox("Show Axes")
+        self.axes_chk.setStyleSheet("font-weight: normal;")
+        self.axes_chk.setChecked(False)
+        self.axes_chk.stateChanged.connect(self.toggle_axes)
+        features_layout.addWidget(self.axes_chk)
+
+        self.load_calibration_btn = QPushButton("Load Calibration...")
+        self.load_calibration_btn.setStyleSheet("font-weight: normal;")
+        self.load_calibration_btn.clicked.connect(self.load_calibrations)
+        features_layout.addWidget(self.load_calibration_btn)
+
+        self.save_calibration_btn = QPushButton("Save Calibration...")
+        self.save_calibration_btn.setStyleSheet("font-weight: normal;")
+        self.save_calibration_btn.clicked.connect(self.save_calibrations)
+        features_layout.addWidget(self.save_calibration_btn)
+
+        controls_layout.addWidget(self.features)
+
+        # --------------------------
+    
+        self.quit = QGroupBox()
+        quit_layout = QVBoxLayout(self.quit)
+        self.quit_btn = QPushButton("Quit")
+        self.quit_btn.clicked.connect(self.quit_application)
+        quit_layout.addWidget(self.quit_btn)
+        controls_layout.addWidget(self.quit)
+
+        #-------------
+
         controls_layout.addStretch(1)
         main_layout.addWidget(controls_container, 0)
         main_container = QWidget(self)
@@ -485,6 +616,7 @@ class RealTimeUSViewer(QWidget):
         self.grid = QGridLayout()
         main_container_layout.addLayout(self.grid)
         main_layout.addWidget(main_container, 1)
+
     def quit_application(self) -> None:
         self._perform_shutdown()
         app = QApplication.instance()
@@ -500,10 +632,6 @@ class RealTimeUSViewer(QWidget):
         #for a napari surface: (vertices, faces, values)
         return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
     
-    def load_needle_mesh(self,path):
-        mesh = self.meshio.read(path)
-        return (mesh.points, mesh.cells_dict['triangle'], np.ones(len(mesh.points)))
-
     def _init_viewers_and_layers(self) -> None:
         # 3D viewer
         model3d = ViewerModel(ndisplay=3)
@@ -533,9 +661,7 @@ class RealTimeUSViewer(QWidget):
         ultrasound_layout.addWidget(ultrasound_label)
         ultrasound_layout.addWidget(ultrasound_qt)
         ultrasound_qt.show()
-        # self.grid.addWidget(self.ultrasound_container, 0, 2, 1, 1)
-        # self.grid.setRowStretch(0, 2)
-        # self.grid.setRowStretch(1, 1)
+      
         self._ultrasound_frame = np.zeros(UltrasoundImage.US_2D_SHAPE, dtype=np.float32)
         self.ultrasound_image_layer = self.ultrasound_model.add_image(
             self._ultrasound_frame,
@@ -564,7 +690,25 @@ class RealTimeUSViewer(QWidget):
             blending='additive',
             affine=np.eye(4)
         )
+
+        self.scan_trail_layer = self.model3d.add_points(
+            None, 
+            name='Scan Trail',
+            ndim=3, 
+            size=4, 
+            blending='additive',
+        )
+
+        self.model3d.text_overlay.visible = True
+        self.model3d.text_overlay.position = 'top_left'
+        self.model3d.text_overlay.color = 'white'
+        self.model3d.text_overlay.font_size = 16
+
+        # self.grid.setRowStretch(0, 3) 
+        # self.grid.setRowStretch(1, 1) 
+
         # 2D slice viewers
+
         self.slice_viewers = {}
         self.slice_layers = {}
         plane_keys = ['axial', 'coronal', 'sagittal']
@@ -593,6 +737,14 @@ class RealTimeUSViewer(QWidget):
             img = Image(self.volume, name=key.capitalize())
             pts = Points(np.zeros((self._max_markers, 2), dtype=np.float32), name=f"{key}_pt", size=8)
             vec = Vectors(np.zeros((1, 2, 2), dtype=np.float32), name=f"{key}_vec", vector_style="arrow", edge_width=2.0)
+           
+            needle_pts = Points(
+                np.zeros((0, 2), dtype=np.float32),
+                name="needle",
+                size=12,
+                face_color="cyan",
+            )
+
             if hasattr(self, "us_arrow_chk"):
                 vec.visible = self.us_arrow_chk.isChecked()
             row_axis, col_axis = self._slice_axes_indices(key)
@@ -612,16 +764,22 @@ class RealTimeUSViewer(QWidget):
                 "img": img,
                 "pts": pts,
                 "probe_vec": vec,
+                "needle": needle_pts,
                 "axes": (row_axis, col_axis),
             }
             self.recon_slice_layers[key] = None
+
+            model2d.add_layer(needle_pts) #add last so we can see it first 
+
         # 3D overlay layers
         vec_width = 6.0
+
         self.ground_outline_mesh = self._build_ground_outline_mesh(
             half_extent_mm=GROUND_OUTLINE_HALF_SIZE_MM,
             thickness_mm=GROUND_THICKNESS_MM,
             y_mm=0.0,
         )
+        
         self.ground_outline_layer = self.model3d.add_surface(
             self.ground_outline_mesh,
             name='Ground Outline',
@@ -661,7 +819,6 @@ class RealTimeUSViewer(QWidget):
         )
 
         self.probe_mesh_data = self.load_probe_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\probe.stl")
-        self.needle_mesh_data = self.load_needle_mesh(r"C:\Users\mingd\Desktop\ultrasound_project\ui\needle.stl")
 
         self.probe_layer = self.model3d.add_surface(
             self.probe_mesh_data,
@@ -699,6 +856,12 @@ class RealTimeUSViewer(QWidget):
         )
         if hasattr(self.needle_tip_layer, "edge_color"):
             self.needle_tip_layer.edge_color = 'white'
+
+        for key in self.slice_layers:
+            needle_layer = self.slice_layers[key]['needle']
+            self.slice_viewers[key]['model'].layers.move(self.slice_viewers[key]['model'].layers.index(needle_layer), -1)
+        #ensuring that the needle point is at the top-most layer 
+
     def _apply_camera_defaults(self) -> None:
         """Configure the 3D napari camera to the preferred baseline view."""
         if self.model3d is None:
@@ -917,9 +1080,11 @@ class RealTimeUSViewer(QWidget):
             pose_matrix = self._pose_to_matrix(pos_arr, raw_rot)
             if self._us_calibration_recording:
                 self._capture_ultrasound_calibration_sample(packet.frame_ts, frame2d, pose_matrix)
-            corrected_matrix = pose_matrix @ self.us_correction_matrix
+
+            corrected_matrix = self.world_origin_offset @ pose_matrix @ self.us_correction_matrix
             probe_matrix = corrected_matrix
             probe_translation = probe_matrix.copy()
+
             orientation_correction = R.from_euler('y', 90, degrees=True).as_matrix()
             probe_orientation = np.eye(4) 
             probe_orientation[:3,:3] = orientation_correction
@@ -1029,22 +1194,136 @@ class RealTimeUSViewer(QWidget):
             self._last_body_rot = pose.body_rot
             markers_list = markers if markers is not None else []
             self._last_marker_m = markers_list[0] if markers_list else None
+
             # --- 3D ultrasound slice rendering ---
+
             if self.ultrasound_image_layer is not None:
                 if self._ultrasound_frame is None or self._ultrasound_frame.shape != frame2d.shape:
                     self._ultrasound_frame = frame2d.copy()
                 else:
                     np.copyto(self._ultrasound_frame, frame2d)
                 self.ultrasound_image_layer.data = self._ultrasound_frame
+           
             np.copyto(self.live_slice[0], frame2d)
+
             T = np.eye(4, dtype=np.float32)
             rotation = (pose.body_rot * pose.align_rot).as_matrix().astype(np.float32)
             scale_matrix = np.diag(self.live_slice_spacing)
             T[:3, :3] = rotation @ scale_matrix
             anchor_offset_mm = scale_matrix @ self.live_slice_anchor_idx
             T[:3, 3] = pose.pos_mm - rotation @ anchor_offset_mm
+         
             self.live_slice_layer.data = self.live_slice
             self.live_slice_layer.affine = T
+
+            # ghost slice logic 
+            # if self.recording: 
+
+            #     ghost_data = self.live_slice.copy()
+
+            #     ghost_layer = self.model3d.add_image(
+            #         ghost_data,
+            #         affine=T.copy(),
+            #         opacity = 0.3,
+            #         blending = 'additive',
+            #         colormap = 'gray',
+            #         contrast_limits = self.live_slice_layer.contrast_limits,
+            #     )
+
+            #     self.ghost_slices.append(ghost_layer)
+
+            #     if len(self.ghost_slices) > self.max_ghosts: 
+            #         old_layer = self.ghost_slices.pop(0)
+            #         self.model3d.layers.remove(old_layer)
+
+            #points logic 
+            # if self.recording:
+            #     point_colors = []
+            #     current_pos_mm = T[:3, 3] 
+            #     should_add = False
+            #     if len(self.scan_trail_layer.data) == 0:
+            #         should_add = True
+            #     else:
+            #         last_pos = self.scan_trail_layer.data[-1]
+            #         dist = np.linalg.norm(current_pos_mm - last_pos)
+            #         if dist > 2.0:  # Only add a point every 2mm of movement
+            #             should_add = True 
+            #     if should_add:
+            #         self.scan_trail_layer.add(current_pos_mm[np.newaxis, :])
+
+
+            if self.recording:
+
+                current_pos_mm = T[:3, 3] 
+                should_add = False
+                
+                if len(self.scan_trail_layer.data) == 0:
+                    should_add = True
+                else:
+                    last_pos = self.scan_trail_layer.data[-1]
+                    dist = np.linalg.norm(current_pos_mm - last_pos)
+                    if dist > 2.0:
+                        should_add = True 
+
+                if should_add:
+
+                    grid_resolution = 10.0 #10mm
+                    grid_coord = tuple((current_pos_mm / grid_resolution).astype(int))
+
+                    self.occupancy_grid[grid_coord] += 1
+                    hits = self.occupancy_grid[grid_coord]
+
+                    if hits < 4:
+                        new_color = COLOR_RED 
+                    elif hits < 8:
+                        new_color = COLOR_YELLOW 
+                    else:
+                        new_color = COLOR_GREEN
+
+                        #to account for rgba: shape is (1,4) 
+                        # (number of points, number of color channels)
+
+                    self.scan_trail_layer.add(current_pos_mm[np.newaxis, :])
+                    
+                    #get full array of existing colors 
+                    all_colors = self.scan_trail_layer.face_color
+
+                    all_colors[-1] = new_color.flatten() #overwrite white with specific density color 
+                    self.scan_trail_layer.face_color = all_colors
+
+                    num_frames = len(self.recorded_frames)
+                    num_points = len(self.scan_trail_layer.data)
+
+
+                    green_def = COLOR_GREEN.flatten() 
+
+                    is_green = np.all(all_colors == green_def, axis=1)
+                    green_count = np.sum(is_green)
+
+                    if len(all_colors) > 0:
+
+                        total_num_points = len(all_colors)
+                        green_ratio = green_count / total_num_points 
+                        status = green_ratio * 100
+
+                        # if green_ratio > 0.8:
+                        #     status = "At least 80% coverage. Volume scan complete. "
+                        # elif green_ratio > 0.4: 
+                        #     status = "At least 40% coverage. Continue scanning."
+                        # else:
+                        #     status = "Less than 40% coverage. Continue scanning."
+
+                    self.model3d.text_overlay.text = (
+                        f"Mode: Recording...\n"
+                        f"Frames: {num_frames}\n"
+                        F"Status: {int(status)}% sufficient coverage."
+                    )
+            else: 
+                self.model3d.text_overlay.text = (
+                    f"Mode: Idle\n"
+                    f"Begin Scanning."
+                )
+                    
             # --- Markers ---
             n_markers = len(markers_list)
             if n_markers > self._max_markers:
@@ -1060,11 +1339,48 @@ class RealTimeUSViewer(QWidget):
                     self.marker_layer.data = self.marker_data[:n_markers]
             else:
                 self.marker_layer.data = np.zeros((0, 3), dtype=np.float32)
+
+            
+            # --- have slice index follow the needle -- # 
+
+            if self._current_needle_pose is not None:
+
+                tip = self._current_needle_pose.pos_mm
+
+                if np.all(np.isfinite(tip)):
+                    voxel = self._mm_to_voxel(tip)
+
+                    for key, viewer in self.slice_viewers.items():
+                        model2d = viewer["model"]
+                        axis = SLICE_AXES[key]
+                        try:
+                            model2d.dims.set_point(axis, voxel[axis])
+                            # print("following needle in slices")
+                        except Exception:
+                            pass
+
             # --- 2D overlays ---
+
             for key, viewer in self.slice_viewers.items():
                 layers = self.slice_layers[key]
+                
+                needle_layer = layers.get("needle")
+
+                if needle_layer is not None and self._current_needle_pose is not None:
+
+                    tip = self._current_needle_pose.pos_mm
+
+                    if np.all(np.isfinite(tip)):
+                        try:
+                            pt2d = self.project_to_slice(key, tip)
+                            needle_layer.data = np.array([pt2d], dtype=np.float32)
+                            
+                        except Exception:
+                            needle_layer.data = np.zeros((0, 2), dtype=np.float32)
+
                 pts_layer = layers["pts"]
                 model2d = viewer["model"]
+
                 axis = SLICE_AXES[key]
                 slice_idx = self._clamp_slice_index(model2d, axis)
                 slice_mm = slice_idx * float(self._voxel_size_mm[axis])
@@ -1096,6 +1412,13 @@ class RealTimeUSViewer(QWidget):
         if key == "sagittal":
             return 0, 1
         raise ValueError(f"Unknown slice key: {key}")
+    
+    def _mm_to_voxel(self, pt_mm):
+        return [
+            pt_mm[i] / float(self._voxel_size_mm[i])
+            for i in range(3)
+        ]
+
     def _clamp_slice_index(self, model: ViewerModel, axis: int) -> float:
         volume = getattr(self, "volume", None)
         if isinstance(volume, np.ndarray):
@@ -1148,8 +1471,12 @@ class RealTimeUSViewer(QWidget):
         if self.needle_tip_layer is not None:
             data = np.asarray(self._needle_tip_points, dtype=np.float32)
             self.needle_tip_layer.data = data
+
     def toggle_needle_slice_overlay(self, state: int) -> None:
-        _ = state
+        visible = bool(state)
+        for key in self.slice_layers:
+            self.slice_layers[key]["needle"].visible = visible
+
     def toggle_markers(self, state: int) -> None:
         visible = bool(state)
         self.marker_layer.visible = visible
@@ -1341,6 +1668,21 @@ class RealTimeUSViewer(QWidget):
             frame_step=1,
             inplane_origin="topcenter",
         )
+
+
+        # def clear_ghosts(self):
+        #     for layer in self.ghost_slices:
+        #         if layer in self.model3d.layers:
+        #             self.model3d.layers.remove(layer)
+        #     self.ghost_slices.clear()
+
+
+        #clear all the points when reconstructing volume 
+
+        self.scan_trail_layer.data = np.zeros((0, 3), dtype=np.float32) #clear points layer 
+        self.scan_trail_layer.face_color = np.zeros((0, 4), dtype=np.float32) #clear colors 
+        self.occupancy_grid.clear() 
+
         self.last_volume_zyx = vol
         self.last_weights_zyx = weights
         self.last_recon_meta = meta
@@ -1371,36 +1713,52 @@ class RealTimeUSViewer(QWidget):
             np.array2string(meta["origin_mm"], precision=3),
             nonzero,
         )
+    
     def _update_recon_slice_layers(self, volume: np.ndarray) -> None:
-        if not hasattr(self, "recon_slice_layers"):
-            self.recon_slice_layers = {}
-        affine = (
-            self.last_recon_affine
-            if self.last_recon_affine is not None
-            else np.eye(4, dtype=np.float32)
-        )
-        visible = self.recon_volume_chk.isChecked() if hasattr(self, "recon_volume_chk") else True
-        for key, viewer in self.slice_viewers.items():
-            model2d = viewer["model"]
-            layer = self.recon_slice_layers.get(key)
-            if layer is None:
-                layer = Image(
-                    volume,
-                    name=f"{key.capitalize()} Recon",
-                    colormap="gray",
-                    opacity=0.6,
-                    blending="translucent",
-                    visible=visible,
-                    affine=affine,
-                )
-                model2d.add_layer(layer)
-                self.recon_slice_layers[key] = layer
-            else:
-                layer.data = volume
-                layer.affine = affine
-                layer.visible = visible
-            if hasattr(layer, "reset_contrast_limits"):
-                layer.reset_contrast_limits()
+        if volume is None:
+            return 
+    
+        #store volume 
+        self.volume = volume 
+
+        center = [s // 2 for s in volume.shape]
+        
+        #contrast limits 
+        try:
+            vmin, vmax = np.percentile(volume,(1,99))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin, vmax = float(np.min(volume)), float(np.max(volume))
+        except Exception:
+            vmin, vmax = float(np.min(volume)), float(np.max(volume))
+
+        # #center the volume in all slices 
+        # for key, viewer in self.slice_viewers.items():
+
+        #     model2d = viewer["model"]
+
+        #     try:
+        #         displayed = list(model2d.dims.displayed)
+        #         all_axes = list(range(len(volume.shape)))
+
+        #         slicing_axes = [ax for ax in all_axes if ax not in displayed]
+        #         for ax in slicing_axes:
+        #             model2d.dims.set_point(ax, center[ax])
+
+        #     except Exception as e:
+        #         print("ERROR in", key, ":", e)
+
+        
+        #update slice layers 
+        for key, layers in self.slice_layers.items():
+            
+            img_layer = layers.get("img", None)
+            if img_layer is None: 
+                continue 
+
+            img_layer.data = volume 
+            img_layer.contrast_limits = (vmin, vmax)
+
+
     @staticmethod
     def _build_recon_affine(meta: dict) -> np.ndarray:
         voxel = float(meta.get("voxel_size_mm", 1.0))
@@ -1434,7 +1792,9 @@ class RealTimeUSViewer(QWidget):
                 self.ultrasound_model.reset_view()
             except Exception as e:
                 logger.warning("Error resetting live ultrasound view: %s", e, exc_info=True)
+
     def calibrate_ultrasound_transform(self) -> None:
+
         if not self._us_calibration_recording:
             if self._last_raw_pos_m is None or self._last_raw_rot is None:
                 logger.warning("Cannot start ultrasound calibration without a recent pose.")
@@ -1442,6 +1802,9 @@ class RealTimeUSViewer(QWidget):
             self._us_calibration_recording = True
             self._us_calibration_last_ts = None
             self._us_calibration_samples.clear()
+            self.us_sample_count_label.setText(f"US Samples: {len(self._us_calibration_samples)}")
+
+
             self.calibrate_us_btn.setText("Stop Ultrasound Calibration")
             logger.info("Ultrasound calibration recording started. Sweep the planar phantom.")
         else:
@@ -1449,8 +1812,31 @@ class RealTimeUSViewer(QWidget):
             self.calibrate_us_btn.setText("Calibrate Ultrasound Transform")
             try:
                 result = self._solve_ultrasound_calibration()
+
+                rms = result.get('rms_mm', "n/a")
+                count = result.get('num_samples', "n/a")
+                        
+                self.us_rms_label.setText(f"RMS Error: {rms:.4f} mm")
+                self.us_sample_count_label.setText(f"Samples: {count}")
+                
+                if rms < 1.0:
+                    self.us_rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
+                    self.us_calib_health_label.setText("Status: Good US Alignment")
+                    self.us_calib_health_label.setStyleSheet("color: #2ecc71")
+                elif rms < 2.5:
+                    self.us_rms_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 14px;") # Yellow
+                    self.us_calib_health_label.setText("Status: Acceptable US Alignment")
+                    self.us_calib_health_label.setStyleSheet("color: #f1c40f")
+                else:
+                    self.us_rms_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;") # Red
+                    self.us_calib_health_label.setText("Status: Poor US Alignment")
+                    self.us_calib_health_label.setStyleSheet("color: #e74c3c")
+
+                self._last_us_calibration_result = result
+
             except Exception:
                 logger.exception("Ultrasound calibration solve failed.")
+
                 QMessageBox.critical(
                     self,
                     "Ultrasound Calibration Failed",
@@ -1458,6 +1844,7 @@ class RealTimeUSViewer(QWidget):
                 )
                 self._clear_ultrasound_calibration_samples()
                 return
+            
             if result is None:
                 QMessageBox.warning(
                     self,
@@ -1467,6 +1854,7 @@ class RealTimeUSViewer(QWidget):
                 self._clear_ultrasound_calibration_samples()
                 return
             self._last_us_calibration_result = result
+
             tilt_text = (
                 f"{result['tilt_degrees']:.2f}°" if result.get("tilt_degrees") is not None else "n/a"
             )
@@ -1475,6 +1863,7 @@ class RealTimeUSViewer(QWidget):
                 spacing_text = f"{spacing_text[0]:.4f}, {spacing_text[1]:.4f} mm/px"
             else:
                 spacing_text = "unknown"
+
             summary_lines = [
                 f"Samples: {result['num_samples']} (points: {result.get('num_points', 0)})",
                 f"Residual RMS: {result['rms_mm']:.3f} mm (max {result['max_abs_mm']:.3f} mm)",
@@ -1482,6 +1871,7 @@ class RealTimeUSViewer(QWidget):
                 f"Pose spread: {result.get('spread_xy_mm', 0.0):.1f} mm, tilt span {result.get('tilt_span_deg', 0.0):.1f}°",
                 f"Pixel spacing used: {spacing_text}",
             ]
+
             QMessageBox.information(
                 self,
                 "Ultrasound Calibration Complete",
@@ -1493,71 +1883,47 @@ class RealTimeUSViewer(QWidget):
                 result["rms_mm"],
                 result["max_abs_mm"],
             )
+
             self._clear_ultrasound_calibration_samples()
+
     def reset_ultrasound_transform(self) -> None:
         # Ultrasound calibration: T_probe_image (image -> probe); identity until calibrated.
         self.us_correction_matrix = np.eye(4, dtype=np.float32)
         logger.info("Ultrasound transform reset to identity.")
         self._clear_ultrasound_calibration_samples()
 
-    def _apply_simple_us_calibration(self, rot_matrix: np.ndarray, label: str) -> None:
-        """
-        Quick calibration: force the ultrasound plane to lie in the YZ plane with rows pointing
-        down toward -Y, and anchor the top-middle pixel at the world origin.
-        """
-        if self._last_raw_pos_m is None or self._last_raw_rot is None:
-            logger.warning("Simple ultrasound calibration requires an active ultrasound pose.")
-            QMessageBox.warning(
-                self,
-                "Simple Calibration",
-                "No ultrasound pose is available. Wait for tracking before applying the simple calibration.",
-            )
-            return
-        T_probe = np.eye(4, dtype=np.float64)
-        try:
-            T_probe[:3, :3] = self._last_raw_rot.as_matrix().astype(np.float64)
-        except Exception:
-            logger.exception("Failed to build probe rotation for simple calibration.")
-            return
-        try:
-            T_probe[:3, 3] = np.asarray(self._last_raw_pos_m, dtype=np.float64).reshape(3)
-        except Exception:
-            logger.exception("Failed to build probe translation for simple calibration.")
-            return
-        T_target = np.eye(4, dtype=np.float64)
-        T_target[:3, :3] = rot_matrix
-        try:
-            T_probe_inv = np.linalg.inv(T_probe)
-        except np.linalg.LinAlgError:
-            logger.error("Simple ultrasound calibration failed: probe pose is not invertible.")
-            return
-        correction = T_probe_inv @ T_target
-        self.us_correction_matrix = correction.astype(np.float32)
-        self._clear_ultrasound_calibration_samples()
-        normal = rot_matrix[:, 2]
-        x_axis = rot_matrix[:, 0]
-        y_axis = rot_matrix[:, 1]
-        logger.info(
-            "Applied simple ultrasound calibration [%s]. x->(%.2f, %.2f, %.2f), y->(%.2f, %.2f, %.2f), normal=(%.2f, %.2f, %.2f), origin @ (0,0,0).",
-            label,
-            float(x_axis[0]),
-            float(x_axis[1]),
-            float(x_axis[2]),
-            float(y_axis[0]),
-            float(y_axis[1]),
-            float(y_axis[2]),
-            float(normal[0]),
-            float(normal[1]),
-            float(normal[2]),
-        )
+    def simple_set_ultrasound_origin(self) -> None:
+        if self._last_raw_pos_m is not None and self._last_raw_rot is not None:
+            current_calibrated_pose = self._pose_to_matrix(self._last_raw_pos_m, self._last_raw_rot) @ self.us_correction_matrix
+            self.world_origin_offset = np.eye(4, dtype=np.float32)
+            self.world_origin_offset[:3, 3] = -current_calibrated_pose[:3, 3] 
+            
+            # print(f"DEBUG: origin: {self.world_origin_offset[:3, 0], self.world_origin_offset[:3, 1], self.world_origin_offset[:3, 2]}")
 
-    def simple_calibrate_ultrasound_origin(self) -> None:
-        """Anchor at (0,0,0) with normal +X (faces forward), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_FWD, label="face +Y")
+    def simple_set_needle_origin(self):
+        if self._last_raw_needle_pos_m is not None and self._last_raw_needle_rot is not None:
+          
+            current_inv_rot = self._last_raw_needle_rot.inv().as_matrix()
+            
 
-    def simple_calibrate_ultrasound_flipped(self) -> None:
-        """Anchor at (0,0,0) with normal -X (flipped), rows -> -Z, cols -> +Y."""
-        self._apply_simple_us_calibration(SIMPLE_US_ROT_MAT_REV, label="face -Y")
+            current_inv_trans = -current_inv_rot @ self._last_raw_needle_pos_m
+            
+            base_correction = np.eye(4)
+            base_correction[:3, :3] = current_inv_rot
+            base_correction[:3, 3] = current_inv_trans 
+
+            T_fixed = np.eye(4, dtype=np.float32)
+            # frame_fix = R.from_euler('y', 180, degrees=True).as_matrix()
+            # T_fixed[:3, :3] = frame_fix
+        
+        self.needle_correction_matrix = T_fixed @ base_correction
+
+        if RealTimeUSViewer.needle_prev_solved == True: 
+            self.needle_correction_matrix[1,3] = self.needle_correction_matrix[1,3] + 0.12 #y offset corection 
+
+        
+        logger.info("Needle origin calibrated to current pose.")
+
 
     def _detect_plane_points(self, frame: np.ndarray, max_points: int = 200) -> np.ndarray:
         """
@@ -1715,6 +2081,7 @@ class RealTimeUSViewer(QWidget):
             )
         plane_normal = self._plane_normal
         plane_offset_m = self._plane_offset_m
+        
 
         def _params_to_matrix(params: np.ndarray) -> np.ndarray:
             rot = R.from_rotvec(params[:3]).as_matrix()
@@ -1733,6 +2100,10 @@ class RealTimeUSViewer(QWidget):
                 pts_h = np.concatenate([pts_m, np.ones((pts_m.shape[0], 1), dtype=np.float64)], axis=1)
                 world_pts = (s.pose_matrix.astype(np.float64) @ T_probe_image @ pts_h.T).T
                 dist = world_pts[:, :3] @ plane_normal + plane_offset_m
+
+                # print("DEBUG: First world pt:", world_pts[0, :3])
+                # print("DEBUG: Distance (mm):", dist[0] * 1000)
+
                 res_list.append(dist)
             if not res_list:
                 return np.zeros((1,), dtype=np.float64)
@@ -1801,6 +2172,8 @@ class RealTimeUSViewer(QWidget):
                 )
 
         T_probe_image = _params_to_matrix(params)
+        
+        
         overall_residuals_mm = _residuals(params, samples) * SCALE
         rms_mm = float(np.sqrt(np.mean(overall_residuals_mm**2)))
         max_abs_mm = float(np.max(np.abs(overall_residuals_mm)))
@@ -1826,7 +2199,32 @@ class RealTimeUSViewer(QWidget):
                     np.degrees(np.arccos(np.clip(np.dot(mean_normal, plane_normal), -1.0, 1.0)))
                 )
 
-        self.us_correction_matrix = T_probe_image.astype(np.float32)
+        # new_correction = T_probe_image.astype(np.float32)
+        # self.us_correction_matrix = self.world_origin_offset @ new_correction
+        
+        # raw_calib_mtx = T_probe_image.astype(np.float32)
+        arrow_adj_mat = np.eye(4)
+        arrow_adj = R.from_euler('xyz',[0,90,180], degrees=True).as_matrix()
+
+        current_inv_rot = self._last_raw_rot.inv().as_matrix()
+        current_inv_trans = -current_inv_rot @ self._last_raw_pos_m
+        
+        self.us_correction_matrix[:3, :3] = current_inv_rot
+        
+        arrow_adj_mat[:3, :3] = arrow_adj
+        self.us_correction_matrix[:3, 3] = current_inv_trans
+        # self.us_correction_matrix = self.world_origin_offset @ self.us_correction_matrix
+        # self.us_correction_matrix = self.us_correction_matrix @ arrow_adj_mat
+        
+        self.us_correction_matrix = self.world_origin_offset @ arrow_adj_mat @ self.us_correction_matrix
+
+
+        #reset
+        # self.world_origin_offset = np.eye(4, dtype=np.float32)
+
+        # print("DEBUG: Pose translation:", s.pose_matrix[:3, 3])
+        # print("DEBUG: Plane normal:", plane_normal)
+
         return {
             "num_samples": len(samples),
             "num_points": total_points,
@@ -1839,6 +2237,7 @@ class RealTimeUSViewer(QWidget):
             "correction_matrix": self.us_correction_matrix.copy(),
             "frame_stats": frame_stats,
         }
+    
     def toggle_needle_pivot_calibration(self, checked: bool) -> None:
         if checked:
             if (
@@ -1880,10 +2279,33 @@ class RealTimeUSViewer(QWidget):
                 self._update_needle_pivot_status("error")
                 return
             self._pivot_capture_count = _needle_pivot_calibrator.num_samples()
+            RealTimeUSViewer.needle_prev_solved = True
             summary = result.get("summary")
             if summary:
                 logger.info(summary)
             rms = result.get("rms_mm")
+
+            self.pivot_rms = rms 
+
+            self.needle_rms_label.setText(f"RMS Error: {rms:.4f} mm")
+            
+            if self.pivot_rms is not None:
+
+                if rms < 1.0:
+                    self.needle_rms_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 14px;") # Green
+                    self.needle_calib_health_label.setText("Status: Good Needle Alignment")
+                    self.needle_calib_health_label.setStyleSheet("color: #2ecc71")
+
+                elif rms < 2.5:
+                    self.needle_rms_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 14px;") # Yellow
+                    self.needle_calib_health_label.setText("Status: Acceptable Needle Alignment")
+                    self.needle_calib_health_label.setStyleSheet("color: #f1c40f")
+
+                else:
+                    self.needle_rms_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 14px;") # Red
+                    self.needle_calib_health_label.setText("Status: Poor Needle Alignment")
+                    self.needle_calib_health_label.setStyleSheet("color: #e74c3c")
+
             if isinstance(rms, (int, float)):
                 self._update_needle_pivot_status(f"RMS {rms:.2f} mm")
             else:
@@ -1897,6 +2319,7 @@ class RealTimeUSViewer(QWidget):
                 self._apply_tip_transform_to_viewer(np.asarray(tip, dtype=np.float32))
             else:
                 self._apply_tip_transform_to_viewer(None)
+
     def _record_pivot_sample(self, needle_pose: Pose, ts: Optional[float]) -> None:
         if not self._pivot_recording:
             return
@@ -1942,6 +2365,7 @@ class RealTimeUSViewer(QWidget):
             if not self._needle_has_pose and not self._pivot_recording:
                 status = "no pose"
         self.needle_pivot_status.setText(f"Pivot samples: {self._pivot_capture_count} ({status})")
+    
     def _apply_tip_transform_to_viewer(self, tip_offset: Optional[np.ndarray]) -> None:
         """Update viewer-side transform so the 3D needle aligns with the calibrated tip."""
         if tip_offset is None:
@@ -1964,6 +2388,7 @@ class RealTimeUSViewer(QWidget):
             "Applied needle tip transform to 3D viewer (offset: %s).",
             np.array2string(tip_vec_mm, precision=4),
         )
+
     def clear_needle_tip_calibration(self) -> None:
         global _last_tip_offset_mm
         _last_tip_offset_mm = None

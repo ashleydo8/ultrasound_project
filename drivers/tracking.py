@@ -139,9 +139,9 @@ class NatNetClientWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
-    # --- Real/Callback methods ---
     
     def _on_rigid_body(self, rigid_id, position, rotation):
+        # print(f"Received ID: {rigid_id}")
         self._rigid_body_data[rigid_id] = (position, rotation)
 
     def _on_unlabeled_markers(self, unlabeled_markers_list):
@@ -215,6 +215,7 @@ class NatNetClientWrapper:
                     _permute_quat_to_napari(_fake_needle_quat()),
                 ),
             }
+        
         poses: Dict[int, Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
         for rigid_id, (pos, quat) in self._rigid_body_data.items():
             pos_p = _permute_position_to_napari(pos)
@@ -236,3 +237,4 @@ class NatNetClientWrapper:
         else:
             marker_sets = self._marker_sets
         return {name: _permute_markers_to_napari(markers) for name, markers in marker_sets.items()}
+
