@@ -20,7 +20,7 @@
 
 ```mermaid
 graph TD
-    A[run app.py] --> B]
+    A[run app.py] --> B
     A --> C[drivers/imaging.py]
     A --> D[drivers/tracking.py]
     
