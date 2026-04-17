@@ -14,13 +14,13 @@
 
 ## ui/
 *The presentation and user interaction layer.*
-* **`viewer.py`**: Manages Napari viewers, image layers, and real-time contrast/rendering settings.
+* **`app.py`**: Manages Napari viewers, image layers, and real-time contrast/rendering settings.
 * **`widgets.py`**: Custom Qt buttons and controls for triggering calibration, recording, and volume reconstruction.
 
 
 ```mermaid
 graph TD
-    A[app.py] --> B[ui/viewer.py]
+    A[app.py] --> B[ui/app.py]
     A --> C[drivers/imaging.py]
     A --> D[drivers/tracking.py]
     
