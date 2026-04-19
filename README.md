@@ -45,9 +45,9 @@ graph TD
 
 1. Clarius firmware is 12.2.1.
    
-2. Cast Binary Release used is 12.2.0 (for Mac Intel core)
+2. Cast Binary Release used is 12.2.0 (for Mac Intel core, same for Windows Equivalent) 
    
-3. dependencies include: pyclariuscast.so, libcast.dylib
+3. dependencies include: pyclariuscast.so, libcast.dylib (for Mac) 
 
 ## Acknowledgements 
 
