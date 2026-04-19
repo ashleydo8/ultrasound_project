@@ -1,4 +1,13 @@
 # Kaneko Lab - 3D Ultrasound Volume Reconstruction from 2D Slices Application
+
+## Steps  
+1. First, display Clarius Ultrasound data by connecting a device to the Probe's Wifi using the Clarius app. Ensure that "IMU" under the "Research" section is enabled. Adjust image Gain, display depth, and other features as needed. 
+2. Connect the computer to the Probe's Wifi. Ensure that there are no active VPN connections, as this interferes with the connection made to the scanner.
+3. Download the Cast Binary Release and add it to the project. In `drivers/imaging.py`, change the file path as necessary. Ensure that the Cast Binary Release version matches the software version of the Clarius app used.
+4. Open Motive (the softwaer for the OptiTrack system). Calibrate the space and set the ground plane. Ensure that 2 Rigid Bodies (Assets) are made. One should be named "Ultrasound" and the other named "Needle". Under "Asset Properties", "Ultrasound" Streaming ID should be 0 and "Needle" Streaming ID should be 1. 
+5. Run the file `app.py`.
+6. Adjust values (i.e. opacity of reconstructed volume) as necessary. 
+
 ## Project Structure 
 
 ## core/
@@ -45,9 +54,9 @@ graph TD
 
 1. Clarius firmware is 12.2.1.
    
-2. Cast Binary Release used is 12.2.0 (for Mac Intel core, same for Windows Equivalent) 
+2. Cast Binary Release used is 12.2.0 (for Mac Intel core, same for Windows equivalent) 
    
-3. dependencies include: pyclariuscast.so, libcast.dylib (for Mac) 
+3. dependencies include: pyclariuscast.so, libcast.dylib (for Mac)
 
 ## Acknowledgements 
 
