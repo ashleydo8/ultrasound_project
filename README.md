@@ -60,7 +60,7 @@ graph TD
 
 ## Acknowledgements 
 
-Thank you to Dr. Naoki Kaneko for providing the resources and support to complete this project. 
+Thank you to Dr. Naoki Kaneko (David Geffen School of Medicine, Department of Radiological Sciences) for providing the resources and support to complete this project and Mingda He (B.S. Congnitive Science, 2023) for developing the code for volumne reconstruction and calibration. 
 
 
 
